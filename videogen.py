@@ -84,6 +84,26 @@ def _to_square_note(src, dest, keep_audio=False):
     return dest
 
 
+def _to_square_note_with_audio(video_src, audio_src, dest):
+    """Квадратный video note: видео берём из липсинка, а ЗВУК - из исходного
+    чистого TTS-файла (модель губ часто портит/тянет свою аудиодорожку)."""
+    size = VIDEO_NOTE_SIZE
+    vf = (
+        "crop=w=min(iw\\,ih):h=min(iw\\,ih):x=(iw-min(iw\\,ih))/2:y=0,"
+        f"scale={size}:{size}"
+    )
+    cmd = [
+        _ffmpeg_exe(), "-y", "-i", video_src, "-i", audio_src,
+        "-vf", vf,
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "128k",
+        "-shortest", "-movflags", "+faststart", dest,
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+    return dest
+
+
 def generate_circle(image_path, motion_prompt, user_id):
     """Сделать видео-кружок из фото. Вернуть путь к квадратному mp4."""
     fal_client = _client()
@@ -135,6 +155,11 @@ def generate_talking_circle(image_path, text, user_id):
     )
     audio_url = _first_audio_url(tts)
 
+    user_dir = os.path.join(MEDIA_DIR, str(user_id))
+    os.makedirs(user_dir, exist_ok=True)
+    # Сохраняем чистый звук озвучки - его и наложим в финале.
+    audio_path = _download(audio_url, os.path.join(user_dir, f"{uuid.uuid4().hex}.mp3"))
+
     image_url = fal_client.upload_file(image_path)
     result = fal_client.subscribe(
         TALKING_MODEL,
@@ -149,11 +174,10 @@ def generate_talking_circle(image_path, text, user_id):
     if not url:
         raise RuntimeError("fal вернул результат без видео")
 
-    user_dir = os.path.join(MEDIA_DIR, str(user_id))
-    os.makedirs(user_dir, exist_ok=True)
     raw = _download(url, os.path.join(user_dir, f"{uuid.uuid4().hex}_traw.mp4"))
-    note = _to_square_note(
-        raw, os.path.join(user_dir, f"{uuid.uuid4().hex}_tnote.mp4"), keep_audio=True
+    # Видео из липсинка + ЧИСТЫЙ звук из TTS (иначе речь может быть невнятной).
+    note = _to_square_note_with_audio(
+        raw, audio_path, os.path.join(user_dir, f"{uuid.uuid4().hex}_tnote.mp4")
     )
     logging.info("Сгенерирован говорящий кружок user_id=%s", user_id)
     return note
