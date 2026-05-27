@@ -494,6 +494,24 @@ async def checkin_loop():
 async def main():
     """Точка входа: подготовить базу, запустить фоновую задачу и опрос Telegram."""
     database.init_db()
+
+    # Диагностика фото: какой Python запустил бота и виден ли ему fal_client.
+    # Если тут WARNING — пакет стоит в ДРУГОМ интерпретаторе (типичная беда на Mac).
+    import sys
+    logging.info("Python бота: %s", sys.executable)
+    if not imagegen.is_enabled():
+        logging.info("Фото выключены: не задан FAL_KEY в .env")
+    else:
+        try:
+            import fal_client
+            logging.info("fal_client доступен: %s", fal_client.__file__)
+        except Exception as exc:
+            logging.warning(
+                "fal_client НЕ виден этому Python (%s). Установи в него: "
+                "%s -m pip install --user fal-client | детали: %r",
+                sys.executable, sys.executable, exc,
+            )
+
     # Фоновая задача «бот пишет первым» крутится параллельно с приёмом сообщений.
     asyncio.create_task(checkin_loop())
     await dp.start_polling(bot)
