@@ -37,6 +37,14 @@ CHECKIN_LABELS = {
     "often": "Часто",
 }
 
+# Вступительные сообщения при выборе персоны. Изначально на украинском
+# (дальше персона сама подстроится под язык собеседника).
+PERSONA_INTROS = {
+    "friend": "Ну що, давай знайомитись 🙂 Я Алекс. Розкажи, як ти взагалі, що нового?",
+    "coach": "Радий знайомству, я Ніка. З чим хочеш розібратися? Що зараз для тебе важливо?",
+    "mira": "Привіт 💛 Я Міра. Рада, що ти поруч. Давай знайомитись - як тебе звати, розкажи трохи про себе?",
+}
+
 # Простое логирование, чтобы видеть в консоли, что бот работает.
 logging.basicConfig(level=logging.INFO)
 
@@ -94,6 +102,15 @@ def checkin_keyboard():
             ],
         ]
     )
+
+
+async def send_persona_intro(message, user_id, persona_key):
+    """Отправить вступительное сообщение от выбранной персоны и сохранить его."""
+    intro = PERSONA_INTROS.get(persona_key)
+    if intro:
+        await message.answer(intro)
+        # Сохраняем как сообщение бота, чтобы персона помнила, что уже представилась.
+        database.add_message(user_id, "assistant", intro)
 
 
 # --- Команды ---
@@ -177,6 +194,7 @@ async def on_persona_chosen(callback: CallbackQuery):
     await callback.message.answer(
         f"Готово, тепер поруч {info['name']}. Змінити завжди можна через /persona."
     )
+    await send_persona_intro(callback.message, user_id, key)
     await callback.answer()
 
 
@@ -190,6 +208,7 @@ async def on_adult_choice(callback: CallbackQuery):
         database.set_adult_confirmed(user_id)
         database.set_persona(user_id, "mira")
         await callback.message.answer("Дякую. Тепер поруч Міра 💛")
+        await send_persona_intro(callback.message, user_id, "mira")
     else:
         await callback.message.answer("Без проблем, лишаємо як є. Нічого не змінюю.")
     await callback.answer()
