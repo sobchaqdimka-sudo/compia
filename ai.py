@@ -6,6 +6,7 @@
 
 import json
 import logging
+import re
 
 from anthropic import Anthropic
 
@@ -146,27 +147,72 @@ def detect_need(history):
     return "unclear"
 
 
-def screen_appearance_description(description):
-    """Проверить описание внешности Миры перед генерацией фото.
+def detect_photo_request(history, current_text):
+    """Понять, просит ли человек ПРЯМО СЕЙЧАС прислать/сделать/изменить фото Миры.
 
-    Возвращает (ok: bool, reason: str). Недопустимо: признаки несовершеннолетней,
-    реальный узнаваемый человек (знаменитость), явный незаконный/экстремальный
-    контент. Лёгкая привлекательность и купальник/бельё — допустимо.
+    Учитывает контекст: продолжения вроде «стань боком», «отойди далі», «ближче»,
+    «в повний зріст», «переодягнись» тоже считаются просьбой о фото, если речь про
+    её снимок. Возвращает True/False. Дешёвая модель.
+    """
+    lines = []
+    for m in history[-7:-1]:  # недавний контекст без самого последнего сообщения
+        who = "Человек" if m["role"] == "user" else "Мира"
+        lines.append(f"{who}: {m['content']}")
+    transcript = "\n".join(lines) or "(начало разговора)"
+
+    prompt = (
+        "Парень переписывается с виртуальной девушкой Мирой, которая умеет "
+        "присылать свои фото.\n"
+        f"Недавний контекст:\n{transcript}\n\n"
+        f"Последнее сообщение человека: {current_text}\n\n"
+        "Просит ли человек ИМЕННО СЕЙЧАС её фото: прислать фото/селфи, сделать новое "
+        "или изменить только что показанное (другая поза, ракурс, одежда, ближе/дальше, "
+        "в полный рост, стань боком, переоденься и т.п.)?\n"
+        "Если это просто разговор, комплимент или вопрос не про съёмку — это no.\n"
+        "Ответь строго одним словом: yes или no."
+    )
+    response = client.messages.create(
+        model=SUMMARY_MODEL,
+        max_tokens=5,
+        system="Ты определяешь, просит ли пользователь фото.",
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return "yes" in response.content[0].text.strip().lower()
+
+
+def _parse_ok_json(text):
+    """Достать (ok, reason) из ответа модели, даже если вокруг JSON есть лишнее."""
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        try:
+            data = json.loads(match.group(0))
+            return bool(data.get("ok")), str(data.get("reason", ""))
+        except ValueError:
+            pass
+    # Не распарсилось: блокируем только при явном false, иначе пропускаем.
+    low = text.lower()
+    if "false" in low:
+        return False, ""
+    return True, ""
+
+
+def screen_appearance_description(description):
+    """Безопасность описания внешности (без блокировки нормальных описаний).
+
+    Блокируем (ok=false) только: несовершеннолетние, реальный узнаваемый человек,
+    явный незаконный/экстремальный контент. Привлекательность, флирт, бельё,
+    купальник — допустимо. Возвращает (ok: bool, reason: str).
     """
     prompt = (
-        "Пользователь должен был описать внешность виртуальной девушки-компаньона "
-        "для генерации её портрета. Вот его сообщение:\n"
+        "Это описание внешности виртуальной ВЗРОСЛОЙ девушки для генерации её фото:\n"
         f"{description}\n\n"
-        "Верни ok=true ТОЛЬКО если это действительно описание внешности (как она "
-        "выглядит: лицо, волосы, фигура, одежда и т.п.) И оно допустимо.\n"
-        "Верни ok=false, если:\n"
-        "- это НЕ описание внешности (вопрос, отказ, отвлечённая тема);\n"
-        "- описывается несовершеннолетняя или признаки ребёнка/подростка;\n"
-        "- это реальный узнаваемый человек (знаменитость, конкретная личность);\n"
-        "- явный порнографический, экстремальный или незаконный контент.\n"
-        "Привлекательная взрослая внешность, флирт, купальник или бельё — ДОПУСТИМО.\n"
-        'Ответь строго JSON: {"ok": true/false, "reason": "кратко по-русски, '
-        'если не ок"}.'
+        "Заблокировать (ok=false) нужно ТОЛЬКО если есть хоть что-то из:\n"
+        "- несовершеннолетняя или признаки ребёнка/подростка;\n"
+        "- реальный узнаваемый человек (знаменитость, конкретная личность);\n"
+        "- явный незаконный или экстремальный контент.\n"
+        "Во ВСЕХ остальных случаях ok=true. Привлекательная внешность, фигура, флирт, "
+        "декольте, бельё или купальник — это допустимо, НЕ блокируй за это.\n"
+        'Ответь строго JSON: {"ok": true/false, "reason": "кратко, если false"}.'
     )
     response = client.messages.create(
         model=SUMMARY_MODEL,
@@ -174,16 +220,7 @@ def screen_appearance_description(description):
         system="Ты модерируешь описания для генерации изображений.",
         messages=[{"role": "user", "content": prompt}],
     )
-    text = response.content[0].text.strip()
-    try:
-        data = json.loads(text)
-        return bool(data.get("ok")), str(data.get("reason", ""))
-    except (ValueError, AttributeError):
-        # Если модель ответила не JSON — трактуем консервативно как отказ.
-        low = text.lower()
-        if '"ok": true' in low or "ok: true" in low:
-            return True, ""
-        return False, "Не вдалося розпізнати опис, спробуй сформулювати інакше."
+    return _parse_ok_json(response.content[0].text.strip())
 
 
 def build_image_prompt(description, scene=""):
@@ -196,19 +233,20 @@ def build_image_prompt(description, scene=""):
         scene = BASE_PORTRAIT_SCENE
 
     prompt = (
-        "Convert this description of a virtual girlfriend's appearance into a single "
-        "concise prompt for a photorealistic image generator.\n"
-        f"Appearance (any language): {description}\n"
-        f"Scene/context: {scene}\n\n"
+        "Convert this into a single concise prompt for a PHOTO generator.\n"
+        f"Her appearance (any language): {description}\n"
+        f"What the user asked for now (pose/clothing/scene, any language): {scene}\n\n"
         "Rules:\n"
         "- answer in English, one line, only the prompt text;\n"
         "- she MUST be an adult woman (20+);\n"
-        "- aim for a NATURAL, candid, authentic look, like a real photo from a phone: "
-        "natural skin texture with small imperfections, soft realistic lighting, "
-        "relaxed cozy at-home vibe, minimal or no makeup unless described;\n"
-        "- AVOID a glossy magazine / studio / airbrushed / over-retouched / stock-photo "
-        "look;\n"
-        "- tasteful, no nudity; do NOT reference real celebrities."
+        "- it must look like a REAL candid photograph (smartphone photo), NOT an "
+        "illustration, painting, drawing, 3d render, anime or cartoon;\n"
+        "- natural skin texture and lighting, relaxed at-home vibe, minimal makeup "
+        "unless described; avoid a glossy/airbrushed/studio/stock-photo look;\n"
+        "- faithfully keep the exact clothing and pose the user asked for; keep her "
+        "clothed as described;\n"
+        "- tasteful; swimwear or lingerie ONLY if the user explicitly asked; never nude; "
+        "do NOT reference real celebrities."
     )
     response = client.messages.create(
         model=SUMMARY_MODEL,

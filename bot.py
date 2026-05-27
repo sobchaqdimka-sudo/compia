@@ -26,6 +26,7 @@ import personas
 from ai import (
     build_image_prompt,
     detect_need,
+    detect_photo_request,
     generate_checkin,
     get_reply,
     screen_appearance_description,
@@ -309,6 +310,10 @@ def looks_like_photo_request(text):
     return any(trigger in low for trigger in PHOTO_TRIGGERS)
 
 
+# Короткие подписи к фото по запросу (чтобы не повторяться каждый раз).
+PHOTO_CAPTIONS = ["ось, тримай 💛", "це для тебе", "ну як тобі?", "спеціально для тебе 😊"]
+
+
 async def _generate_and_send_base(message, user_id, description):
     """Создать канонический портрет Миры по описанию и отправить его."""
     await message.answer("Добре... дай мені хвилинку 💛")
@@ -322,8 +327,11 @@ async def _generate_and_send_base(message, user_id, description):
         return
     database.save_mira_look(user_id, description, path)
     database.increment_photos(user_id)
-    database.add_message(user_id, "assistant", "[надіслала тобі своє фото] Ось я 💛")
-    await message.answer_photo(FSInputFile(path), caption="Ось я 💛 Подобаюсь?")
+    caption = "Ось я 💛 Подобаюсь?"
+    # В историю кладём ровно текст подписи (а не служебный маркер), чтобы модель
+    # потом НЕ имитировала «отправку фото» в обычных текстовых ответах.
+    database.add_message(user_id, "assistant", caption)
+    await message.answer_photo(FSInputFile(path), caption=caption)
 
 
 async def _generate_and_send_photo(message, user_id, look, request_text):
@@ -340,16 +348,17 @@ async def _generate_and_send_photo(message, user_id, look, request_text):
         await message.answer("Ой, не вийшло цього разу. Спробуймо трохи згодом?")
         return
     database.increment_photos(user_id)
-    database.add_message(user_id, "assistant", "[надіслала тобі своє фото]")
-    await message.answer_photo(FSInputFile(path))
+    caption = random.choice(PHOTO_CAPTIONS)
+    database.add_message(user_id, "assistant", caption)
+    await message.answer_photo(FSInputFile(path), caption=caption)
 
 
-async def try_handle_mira_photo(message, user_id):
+async def try_handle_mira_photo(message, user_id, history):
     """Логика фото Миры. Возвращает True, если сообщение обработано здесь.
 
     Сценарии:
     - ждём описание внешности → текущее сообщение и есть описание (с модерацией);
-    - явная просьба фото, а внешности ещё нет → просим описать;
+    - просьба фото (по ключевым словам ИЛИ по смыслу), внешности нет → просим описать;
     - просьба фото, внешность готова → генерируем фото по референсу.
     """
     if not imagegen.is_enabled():
@@ -362,14 +371,19 @@ async def try_handle_mira_photo(message, user_id):
     if status == "awaiting_description":
         ok, _reason = await asyncio.to_thread(screen_appearance_description, text)
         if not ok:
-            # Это не описание внешности (или недопустимо) - выходим из ожидания,
-            # пусть Мира ответит обычным сообщением, без нотаций.
+            # Недопустимое содержание - выходим из ожидания, без нотаций.
             database.set_mira_look_status(user_id, "none")
             return False
         await _generate_and_send_base(message, user_id, text)
         return True
 
-    if looks_like_photo_request(text):
+    # Просьба о фото: сперва быстрые ключевые слова, иначе - по смыслу через модель
+    # (ловит продолжения вроде «стань боком», «отойди далі», «переодягнись»).
+    is_photo = looks_like_photo_request(text)
+    if not is_photo:
+        is_photo = await asyncio.to_thread(detect_photo_request, history, text)
+
+    if is_photo:
         if status != "ready":
             database.set_mira_look_status(user_id, "awaiting_description")
             ask = (
@@ -449,7 +463,7 @@ async def handle_message(message: Message):
 
     # 4.5) Фото Миры: либо просим описать внешность, либо генерируем по запросу.
     #      Если сообщение обработано здесь (фото/вопрос об описании) — выходим.
-    if persona_key == "mira" and await try_handle_mira_photo(message, user_id):
+    if persona_key == "mira" and await try_handle_mira_photo(message, user_id, history):
         return
 
     # 5) Получаем ответ от модели. Запрос к Anthropic обычный (не async),
