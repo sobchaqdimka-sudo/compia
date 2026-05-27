@@ -8,7 +8,7 @@ import logging
 
 from anthropic import Anthropic
 
-from config import ANTHROPIC_API_KEY, MODEL, SUMMARY_MODEL
+from config import ANTHROPIC_API_KEY, MODEL, PERSONA_MODELS, SUMMARY_MODEL
 from personas import build_system_blocks
 
 # Создаём клиент один раз — он переиспользуется для всех запросов.
@@ -58,7 +58,7 @@ def get_reply(persona_key, history, facts="", transition=False):
         )
 
     response = client.messages.create(
-        model=MODEL,
+        model=PERSONA_MODELS.get(persona_key, MODEL),
         max_tokens=1000,
         system=system_blocks,
         messages=history,  # последние сообщения для контекста
@@ -86,7 +86,7 @@ def generate_checkin(persona_key, facts):
     )
 
     response = client.messages.create(
-        model=MODEL,
+        model=PERSONA_MODELS.get(persona_key, MODEL),
         max_tokens=300,
         system=system_blocks,
         messages=[{"role": "user", "content": instruction}],
