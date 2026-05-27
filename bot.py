@@ -7,6 +7,7 @@
 
 import asyncio
 import logging
+import random
 import re
 
 from aiogram import Bot, Dispatcher, F
@@ -241,15 +242,19 @@ def split_into_bubbles(text, max_bubbles=4):
     parts = [p.strip() for p in re.split(r"\n+", text or "") if p.strip()]
     if len(parts) <= max_bubbles:
         return parts
-    return parts[: max_bubbles - 1] + [" ".join(parts[max_bubbles - 1 :])]
+    return parts[: max_bubbles - 1] + ["\n".join(parts[max_bubbles - 1 :])]
 
 
 async def send_bubbles(chat_id, text):
     """Отправить ответ несколькими сообщениями, как живой человек в мессенджере.
 
+    Число реплик слегка рандомим: иногда всё одним сообщением (когда мысль
+    цельная или это история подлиннее), иногда 2-3 коротких подряд. Так
+    переписка не выглядит каждый раз одинаково «ровно по два смс».
     Между репликами короткая пауза и статус «печатает», чтобы ощущалось живо.
     """
-    bubbles = split_into_bubbles(text)
+    max_bubbles = random.choices([1, 2, 3], weights=[25, 45, 30])[0]
+    bubbles = split_into_bubbles(text, max_bubbles=max_bubbles)
     if not bubbles:
         bubbles = ["..."]
     for i, bubble in enumerate(bubbles):
