@@ -257,6 +257,35 @@ def build_image_prompt(description, scene=""):
     return response.content[0].text.strip()
 
 
+def build_edit_instruction(description, request):
+    """Собрать инструкцию для модели-редактора (Nano Banana) — фото по запросу.
+
+    description — кто она (сохранённое описание внешности).
+    request — что человек хочет сейчас (поза, ракурс, одежда, в полный рост).
+    """
+    prompt = (
+        "Write a single concise English instruction for an image-EDITING model that "
+        "edits a reference photo of a woman.\n"
+        f"Who she is (any language): {description}\n"
+        f"What the user wants now (any language): {request}\n\n"
+        "The instruction must:\n"
+        "- keep the SAME woman: identical face and identity from the reference photo;\n"
+        "- faithfully apply what the user asked (pose, full-body framing, turning to "
+        "the side, different clothing, setting);\n"
+        "- keep it a real candid photograph, natural skin and lighting, not an "
+        "illustration or render;\n"
+        "- tasteful; never nude; swimwear or lingerie only if explicitly requested.\n"
+        "Return only the instruction text, one line."
+    )
+    response = client.messages.create(
+        model=SUMMARY_MODEL,
+        max_tokens=200,
+        system="Ты пишешь инструкции для модели редактирования изображений.",
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return response.content[0].text.strip()
+
+
 def update_memory(previous_facts, recent_messages):
     """Составить обновлённый «конспект» о пользователе.
 

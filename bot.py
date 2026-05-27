@@ -24,6 +24,7 @@ import database
 import imagegen
 import personas
 from ai import (
+    build_edit_instruction,
     build_image_prompt,
     detect_need,
     detect_photo_request,
@@ -339,9 +340,11 @@ async def _generate_and_send_photo(message, user_id, look, request_text):
     await message.answer("Зараз зроблю для тебе 💛")
     await bot.send_chat_action(chat_id=message.chat.id, action="upload_photo")
     try:
-        prompt = await asyncio.to_thread(build_image_prompt, look["desc"], request_text)
+        instruction = await asyncio.to_thread(
+            build_edit_instruction, look["desc"], request_text
+        )
         path = await asyncio.to_thread(
-            imagegen.generate_with_reference, prompt, look["base_path"], user_id
+            imagegen.generate_with_reference, instruction, look["base_path"], user_id
         )
     except Exception:
         logging.exception("Не удалось создать фото user_id=%s", user_id)

@@ -72,18 +72,21 @@ def generate_base_portrait(prompt, user_id):
     return path
 
 
-def generate_with_reference(prompt, reference_path, user_id):
-    """Сгенерировать фото по запросу с тем же лицом (по референсу). Вернуть путь."""
+def generate_with_reference(instruction, reference_path, user_id):
+    """Сгенерировать фото по запросу: редактируем референс по инструкции.
+
+    instruction — текстовая команда для модели-редактора (Nano Banana):
+    «сохрани ту же девушку, покажи в полный рост, повернись боком…».
+    Вернуть путь к сохранённому файлу.
+    """
     fal_client = _client()
     reference_url = fal_client.upload_file(reference_path)
     result = fal_client.subscribe(
         IMAGE_MODEL_REF,
         arguments={
-            "prompt": prompt,
-            "reference_image_url": reference_url,
-            "image_size": "portrait_4_3",
+            "prompt": instruction,
+            "image_urls": [reference_url],
             "num_images": 1,
-            "enable_safety_checker": True,
         },
     )
     dest = os.path.join(_user_dir(user_id), f"{uuid.uuid4().hex}.png")
