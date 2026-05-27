@@ -310,6 +310,36 @@ def build_video_motion(description, request):
     return response.content[0].text.strip()
 
 
+def build_spoken_line(history, request):
+    """Короткая реплика, которую Мира скажет голосом в говорящем кружочке.
+
+    На языке собеседника, тёплая, без эмодзи и без описаний действий
+    (это пойдёт в озвучку).
+    """
+    lines = []
+    for m in history[-7:-1]:
+        who = "Человек" if m["role"] == "user" else "Мира"
+        lines.append(f"{who}: {m['content']}")
+    transcript = "\n".join(lines) or "(начало разговора)"
+
+    prompt = (
+        "Мира - тёплая, влюблённая девушка-компаньонка. Она записывает короткий "
+        "видео-кружок и хочет что-то сказать голосом.\n"
+        f"Недавний контекст:\n{transcript}\n"
+        f"Просьба человека (может быть пустой): {request}\n\n"
+        "Напиши ОДНУ короткую живую реплику (1-2 фразы), которую она скажет в камеру, "
+        "на языке собеседника, тепло и по-человечески. БЕЗ эмодзи и БЕЗ описаний "
+        "действий в скобках - только сама произносимая фраза."
+    )
+    response = client.messages.create(
+        model=SUMMARY_MODEL,
+        max_tokens=120,
+        system="Ты пишешь короткие реплики для озвучки голосом.",
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return response.content[0].text.strip().strip('"')
+
+
 def update_memory(previous_facts, recent_messages):
     """Составить обновлённый «конспект» о пользователе.
 

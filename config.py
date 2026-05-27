@@ -105,3 +105,12 @@ VIDEO_MOTION_DEFAULT = (
     "she looks at the camera, soft natural smile, subtle head movement, slow blink, "
     "hair moves slightly, realistic and gentle, minimal motion"
 )
+
+# --- Говорящие кружочки (TTS + липсинк), всё на fal ---
+# Озвучка: ElevenLabs multilingual (поддерживает рус/укр), на выходе mp3.
+TTS_MODEL = "fal-ai/elevenlabs/tts/multilingual-v2"
+# Голос (тёплый женский, мультиязычный). Можно поменять на другой пресет ElevenLabs.
+TTS_VOICE = "Sarah"
+# Говорящая голова: фото + аудио -> видео с синхроном губ.
+TALKING_MODEL = "veed/fabric-1.0"
+TALKING_RESOLUTION = "480p"

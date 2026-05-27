@@ -27,6 +27,7 @@ import videogen
 from ai import (
     build_edit_instruction,
     build_image_prompt,
+    build_spoken_line,
     build_video_motion,
     detect_need,
     detect_photo_request,
@@ -319,11 +320,41 @@ VIDEO_TRIGGERS = (
     "запиши мені", "зніми відео", "видосик",
 )
 
+# Маркеры просьбы услышать голос → говорящий кружок (TTS + липсинк).
+VOICE_TRIGGERS = (
+    "голос", "озвуч", "вголос", "вслух", "проговори", "скажи мені вголос",
+    "почути тебе", "почути твій", "услышать тебя", "услышать твой", "скажи голосом",
+)
+
 
 def looks_like_video_request(text):
     """Похоже ли сообщение на просьбу записать видео-кружочек."""
     low = (text or "").lower()
     return any(trigger in low for trigger in VIDEO_TRIGGERS)
+
+
+def looks_like_voice_request(text):
+    """Похоже ли, что человек хочет услышать голос (говорящий кружок)."""
+    low = (text or "").lower()
+    return any(trigger in low for trigger in VOICE_TRIGGERS)
+
+
+async def _generate_and_send_talking(message, user_id, look, request_text, history):
+    """Сделать говорящий кружок (голос + липсинк) и отправить как video note."""
+    await message.answer("Записую для тебе відео 🎥")
+    await bot.send_chat_action(chat_id=message.chat.id, action="record_video_note")
+    try:
+        line = await asyncio.to_thread(build_spoken_line, history, request_text)
+        path = await asyncio.to_thread(
+            videogen.generate_talking_circle, look["base_path"], line, user_id
+        )
+    except Exception:
+        logging.exception("Не удалось создать говорящий кружок user_id=%s", user_id)
+        await message.answer("Ой, відео не вийшло цього разу. Спробуймо трохи згодом?")
+        return
+    # В историю кладём то, что она «сказала» голосом - для непрерывности диалога.
+    database.add_message(user_id, "assistant", line)
+    await message.answer_video_note(FSInputFile(path))
 
 
 async def _generate_and_send_circle(message, user_id, look, request_text):
@@ -345,11 +376,17 @@ async def _generate_and_send_circle(message, user_id, look, request_text):
     await message.answer(follow)
 
 
-async def try_handle_mira_video(message, user_id):
-    """Видео-кружочки Миры. Возвращает True, если сообщение обработано здесь."""
+async def try_handle_mira_video(message, user_id, history):
+    """Видео-кружочки Миры. Возвращает True, если сообщение обработано здесь.
+
+    Просьба про голос («скажи голосом», «хочу почути тебе») → говорящий кружок
+    с озвучкой; обычное «відео/кружок» → тихий живой клип.
+    """
     if not videogen.is_enabled():
         return False
-    if not looks_like_video_request(message.text):
+    is_video = looks_like_video_request(message.text)
+    is_voice = looks_like_voice_request(message.text)
+    if not (is_video or is_voice):
         return False
 
     look = database.get_mira_look(user_id)
@@ -364,7 +401,10 @@ async def try_handle_mira_video(message, user_id):
         await message.answer(ask)
         return True
 
-    await _generate_and_send_circle(message, user_id, look, message.text)
+    if is_voice:
+        await _generate_and_send_talking(message, user_id, look, message.text, history)
+    else:
+        await _generate_and_send_circle(message, user_id, look, message.text)
     return True
 
 
@@ -524,7 +564,7 @@ async def handle_message(message: Message):
     # 4.5) Медиа Миры: видео-кружок или фото. Видео проверяем первым (у него свои
     #      слова-маркеры). Если сообщение обработано здесь — выходим.
     if persona_key == "mira":
-        if await try_handle_mira_video(message, user_id):
+        if await try_handle_mira_video(message, user_id, history):
             return
         if await try_handle_mira_photo(message, user_id, history):
             return
