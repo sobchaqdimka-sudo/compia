@@ -14,14 +14,23 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     CallbackQuery,
+    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
 )
 
 import database
+import imagegen
 import personas
-from ai import detect_need, generate_checkin, get_reply, update_memory
+from ai import (
+    build_image_prompt,
+    detect_need,
+    generate_checkin,
+    get_reply,
+    screen_appearance_description,
+    update_memory,
+)
 from config import (
     CHECKIN_POLL_MINUTES,
     HISTORY_LIMIT,
@@ -264,6 +273,99 @@ async def send_bubbles(chat_id, text):
         await bot.send_message(chat_id, bubble)
 
 
+# Слова-маркеры просьбы «пришли фото» (укр/рус/англ). Сравниваем по подстроке
+# в нижнем регистре — отсюда стемы вроде "фотк" ловят и "фотку", и "фоткой".
+PHOTO_TRIGGERS = (
+    "фото", "фотк", "сфотк", "сфота", "селфі", "селфи", "selfie",
+    "покажись", "покажи себе", "покажи себя", "пришли картин", "пришли свою",
+    "як ти виглядаєш", "как ты выглядишь", "хочу тебе побачити",
+    "хочу тебя увидеть", "хочу побачити тебе", "твоє фото", "твое фото",
+    "your photo", "send a pic", "show yourself",
+)
+
+
+def looks_like_photo_request(text):
+    """Похоже ли сообщение на просьбу прислать фото."""
+    low = (text or "").lower()
+    return any(trigger in low for trigger in PHOTO_TRIGGERS)
+
+
+async def _generate_and_send_base(message, user_id, description):
+    """Создать канонический портрет Миры по описанию и отправить его."""
+    await message.answer("Добре... дай мені хвилинку 💛")
+    await bot.send_chat_action(chat_id=message.chat.id, action="upload_photo")
+    try:
+        prompt = await asyncio.to_thread(build_image_prompt, description, "")
+        path = await asyncio.to_thread(imagegen.generate_base_portrait, prompt, user_id)
+    except Exception:
+        logging.exception("Не удалось создать базовый портрет user_id=%s", user_id)
+        await message.answer("Ой, не вийшло цього разу. Спробуймо трохи згодом?")
+        return
+    database.save_mira_look(user_id, description, path)
+    database.increment_photos(user_id)
+    database.add_message(user_id, "assistant", "[надіслала тобі своє фото] Ось я 💛")
+    await message.answer_photo(FSInputFile(path), caption="Ось я 💛 Подобаюсь?")
+
+
+async def _generate_and_send_photo(message, user_id, look, request_text):
+    """Создать фото Миры по запросу, сохраняя то же лицо (по референсу)."""
+    await message.answer("Зараз зроблю для тебе 💛")
+    await bot.send_chat_action(chat_id=message.chat.id, action="upload_photo")
+    try:
+        prompt = await asyncio.to_thread(build_image_prompt, look["desc"], request_text)
+        path = await asyncio.to_thread(
+            imagegen.generate_with_reference, prompt, look["base_path"], user_id
+        )
+    except Exception:
+        logging.exception("Не удалось создать фото user_id=%s", user_id)
+        await message.answer("Ой, не вийшло цього разу. Спробуймо трохи згодом?")
+        return
+    database.increment_photos(user_id)
+    database.add_message(user_id, "assistant", "[надіслала тобі своє фото]")
+    await message.answer_photo(FSInputFile(path))
+
+
+async def try_handle_mira_photo(message, user_id):
+    """Логика фото Миры. Возвращает True, если сообщение обработано здесь.
+
+    Сценарии:
+    - ждём описание внешности → текущее сообщение и есть описание (с модерацией);
+    - явная просьба фото, а внешности ещё нет → просим описать;
+    - просьба фото, внешность готова → генерируем фото по референсу.
+    """
+    if not imagegen.is_enabled():
+        return False
+
+    look = database.get_mira_look(user_id)
+    status = look["status"]
+    text = message.text
+
+    if status == "awaiting_description":
+        ok, _reason = await asyncio.to_thread(screen_appearance_description, text)
+        if not ok:
+            # Это не описание внешности (или недопустимо) - выходим из ожидания,
+            # пусть Мира ответит обычным сообщением, без нотаций.
+            database.set_mira_look_status(user_id, "none")
+            return False
+        await _generate_and_send_base(message, user_id, text)
+        return True
+
+    if looks_like_photo_request(text):
+        if status != "ready":
+            database.set_mira_look_status(user_id, "awaiting_description")
+            ask = (
+                "Хочеш мене побачити? 🙈 А якою ти мене уявляєш? "
+                "Опиши, будь ласка, - аж до одягу."
+            )
+            database.add_message(user_id, "assistant", ask)
+            await message.answer(ask)
+            return True
+        await _generate_and_send_photo(message, user_id, look, text)
+        return True
+
+    return False
+
+
 # --- Обычные сообщения ---
 
 @dp.message()
@@ -325,6 +427,11 @@ async def handle_message(message: Message):
             persona_key = need
             just_switched = True
             logging.info("Онбординг: user_id=%s -> %s", user_id, need)
+
+    # 4.5) Фото Миры: либо просим описать внешность, либо генерируем по запросу.
+    #      Если сообщение обработано здесь (фото/вопрос об описании) — выходим.
+    if persona_key == "mira" and await try_handle_mira_photo(message, user_id):
+        return
 
     # 5) Получаем ответ от модели. Запрос к Anthropic обычный (не async),
     #    поэтому выносим его в отдельный поток, чтобы бот не «зависал».

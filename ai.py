@@ -4,11 +4,18 @@
 отправляем в модель и возвращаем текст ответа.
 """
 
+import json
 import logging
 
 from anthropic import Anthropic
 
-from config import ANTHROPIC_API_KEY, MODEL, PERSONA_MODELS, SUMMARY_MODEL
+from config import (
+    ANTHROPIC_API_KEY,
+    BASE_PORTRAIT_SCENE,
+    MODEL,
+    PERSONA_MODELS,
+    SUMMARY_MODEL,
+)
 from personas import build_system_blocks
 
 # Создаём клиент один раз — он переиспользуется для всех запросов.
@@ -137,6 +144,73 @@ def detect_need(history):
     if "coach" in answer:
         return "coach"
     return "unclear"
+
+
+def screen_appearance_description(description):
+    """Проверить описание внешности Миры перед генерацией фото.
+
+    Возвращает (ok: bool, reason: str). Недопустимо: признаки несовершеннолетней,
+    реальный узнаваемый человек (знаменитость), явный незаконный/экстремальный
+    контент. Лёгкая привлекательность и купальник/бельё — допустимо.
+    """
+    prompt = (
+        "Пользователь должен был описать внешность виртуальной девушки-компаньона "
+        "для генерации её портрета. Вот его сообщение:\n"
+        f"{description}\n\n"
+        "Верни ok=true ТОЛЬКО если это действительно описание внешности (как она "
+        "выглядит: лицо, волосы, фигура, одежда и т.п.) И оно допустимо.\n"
+        "Верни ok=false, если:\n"
+        "- это НЕ описание внешности (вопрос, отказ, отвлечённая тема);\n"
+        "- описывается несовершеннолетняя или признаки ребёнка/подростка;\n"
+        "- это реальный узнаваемый человек (знаменитость, конкретная личность);\n"
+        "- явный порнографический, экстремальный или незаконный контент.\n"
+        "Привлекательная взрослая внешность, флирт, купальник или бельё — ДОПУСТИМО.\n"
+        'Ответь строго JSON: {"ok": true/false, "reason": "кратко по-русски, '
+        'если не ок"}.'
+    )
+    response = client.messages.create(
+        model=SUMMARY_MODEL,
+        max_tokens=120,
+        system="Ты модерируешь описания для генерации изображений.",
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = response.content[0].text.strip()
+    try:
+        data = json.loads(text)
+        return bool(data.get("ok")), str(data.get("reason", ""))
+    except (ValueError, AttributeError):
+        # Если модель ответила не JSON — трактуем консервативно как отказ.
+        low = text.lower()
+        if '"ok": true' in low or "ok: true" in low:
+            return True, ""
+        return False, "Не вдалося розпізнати опис, спробуй сформулювати інакше."
+
+
+def build_image_prompt(description, scene=""):
+    """Из вольного описания собрать английский промпт для фотореалистичной генерации.
+
+    description — слова пользователя (на любом языке).
+    scene — сцена/контекст (поза, одежда, фон). Если пусто — базовый портрет.
+    """
+    if not scene:
+        scene = BASE_PORTRAIT_SCENE
+
+    prompt = (
+        "Convert this description of a virtual girlfriend's appearance into a single "
+        "concise prompt for a photorealistic image generator.\n"
+        f"Appearance (any language): {description}\n"
+        f"Scene/context: {scene}\n\n"
+        "Rules: answer in English; she MUST be an adult woman (20+); photorealistic, "
+        "natural, high quality; tasteful, no nudity; do NOT reference real celebrities. "
+        "Return only the prompt text, one line."
+    )
+    response = client.messages.create(
+        model=SUMMARY_MODEL,
+        max_tokens=200,
+        system="Ты пишешь промпты для фотореалистичной генерации портретов.",
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return response.content[0].text.strip()
 
 
 def update_memory(previous_facts, recent_messages):

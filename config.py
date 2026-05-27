@@ -73,3 +73,21 @@ DB_PATH = "companion.db"
 
 # Папка с текстами персон: по файлу на персону + common.txt с общими правилами.
 PERSONAS_DIR = "personas"
+
+# --- Генерация фото Миры (fal.ai) ---
+# Ключ fal.ai. Без него фича фото просто выключена (бот работает как обычно).
+FAL_KEY = os.getenv("FAL_KEY")
+
+# Модель для базового («канонического») портрета по текстовому описанию.
+IMAGE_MODEL_BASE = "fal-ai/flux/dev"
+# Модель для фото по запросу: держит то же лицо по референсу (ID-адаптер).
+IMAGE_MODEL_REF = "fal-ai/flux-pulid"
+
+# Куда сохраняем сгенерированные изображения (по подпапке на пользователя).
+MEDIA_DIR = "media"
+
+# Дефолтная «сцена» для базового портрета (нейтральный портрет крупным планом).
+BASE_PORTRAIT_SCENE = (
+    "portrait photo, head and shoulders, soft natural lighting, "
+    "neutral background, looking at the camera, gentle smile"
+)

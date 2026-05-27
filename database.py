@@ -57,6 +57,24 @@ def init_db():
     )
     conn.commit()
 
+    # Миграция: добавляем колонки для персональной внешности Миры и счётчика
+    # фото, если их ещё нет (на уже существующей базе). SQLite не умеет
+    # "ADD COLUMN IF NOT EXISTS", поэтому смотрим, какие колонки уже есть.
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(users)")}
+    mira_columns = {
+        # none → ещё не заходила речь о фото;
+        # awaiting_description → попросили описать внешность, ждём ответ;
+        # ready → базовый портрет создан, можно генерить фото по запросу.
+        "mira_look_status": "TEXT NOT NULL DEFAULT 'none'",
+        "mira_look_desc": "TEXT",          # описание внешности словами пользователя
+        "mira_base_path": "TEXT",          # путь к каноническому портрету (референс)
+        "photos_made": "INTEGER NOT NULL DEFAULT 0",  # сколько фото уже сгенерили
+    }
+    for name, decl in mira_columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE users ADD COLUMN {name} {decl}")
+    conn.commit()
+
     # Миграция: всех, кто уже общался с ботом (есть в messages), но кого ещё
     # нет в users, переносим на Миру с подтверждённым 18+. Так старые
     # пользователи не теряют свой романтический контекст и не падают в онбординг.
@@ -207,6 +225,61 @@ def set_adult_confirmed(user_id):
     _ensure_user(conn, user_id)
     conn.execute(
         "UPDATE users SET adult_confirmed = 1 WHERE user_id = ?", (user_id,)
+    )
+    conn.commit()
+    conn.close()
+
+
+# --- Внешность Миры и фото ---
+
+def get_mira_look(user_id):
+    """Вернуть состояние внешности Миры для пользователя.
+
+    Словарь: status ('none'/'awaiting_description'/'ready'),
+    desc (описание словами пользователя) и base_path (путь к портрету-референсу).
+    """
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    row = conn.execute(
+        "SELECT mira_look_status, mira_look_desc, mira_base_path "
+        "FROM users WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    conn.commit()
+    conn.close()
+    return {"status": row[0], "desc": row[1], "base_path": row[2]}
+
+
+def set_mira_look_status(user_id, status):
+    """Обновить только статус внешности (например, 'awaiting_description')."""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    conn.execute(
+        "UPDATE users SET mira_look_status = ? WHERE user_id = ?", (status, user_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def save_mira_look(user_id, desc, base_path):
+    """Сохранить готовую внешность: описание + путь к портрету, статус 'ready'."""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    conn.execute(
+        "UPDATE users SET mira_look_desc = ?, mira_base_path = ?, "
+        "mira_look_status = 'ready' WHERE user_id = ?",
+        (desc, base_path, user_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def increment_photos(user_id):
+    """Увеличить счётчик сгенерированных фото (для учёта расходов)."""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    conn.execute(
+        "UPDATE users SET photos_made = photos_made + 1 WHERE user_id = ?", (user_id,)
     )
     conn.commit()
     conn.close()
