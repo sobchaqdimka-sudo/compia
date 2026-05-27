@@ -200,9 +200,15 @@ def build_image_prompt(description, scene=""):
         "concise prompt for a photorealistic image generator.\n"
         f"Appearance (any language): {description}\n"
         f"Scene/context: {scene}\n\n"
-        "Rules: answer in English; she MUST be an adult woman (20+); photorealistic, "
-        "natural, high quality; tasteful, no nudity; do NOT reference real celebrities. "
-        "Return only the prompt text, one line."
+        "Rules:\n"
+        "- answer in English, one line, only the prompt text;\n"
+        "- she MUST be an adult woman (20+);\n"
+        "- aim for a NATURAL, candid, authentic look, like a real photo from a phone: "
+        "natural skin texture with small imperfections, soft realistic lighting, "
+        "relaxed cozy at-home vibe, minimal or no makeup unless described;\n"
+        "- AVOID a glossy magazine / studio / airbrushed / over-retouched / stock-photo "
+        "look;\n"
+        "- tasteful, no nudity; do NOT reference real celebrities."
     )
     response = client.messages.create(
         model=SUMMARY_MODEL,

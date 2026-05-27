@@ -163,6 +163,25 @@ async def handle_checkins(message: Message):
     )
 
 
+@dp.message(Command("newlook"))
+async def handle_newlook(message: Message):
+    """Пересоздать внешность Миры: сбросить и попросить описать заново."""
+    user_id = message.from_user.id
+    if database.get_persona(user_id) != "mira":
+        await message.answer(
+            "Це про Міру 🙂 Її образ можна змінити, коли поруч саме вона."
+        )
+        return
+    if not imagegen.is_enabled():
+        await message.answer("Фото поки що недоступні.")
+        return
+    database.set_mira_look_status(user_id, "awaiting_description")
+    await message.answer(
+        "Давай переробимо мій образ 💛 Опиши, якою хочеш мене бачити - аж до одягу. "
+        "Можеш додати настрій: наприклад, більш домашня, без макіяжу, природне світло."
+    )
+
+
 # --- Нажатия на кнопки ---
 
 @dp.callback_query(F.data.startswith("start:"))

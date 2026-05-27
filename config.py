@@ -86,8 +86,8 @@ IMAGE_MODEL_REF = "fal-ai/flux-pulid"
 # Куда сохраняем сгенерированные изображения (по подпапке на пользователя).
 MEDIA_DIR = "media"
 
-# Дефолтная «сцена» для базового портрета (нейтральный портрет крупным планом).
+# Дефолтная «сцена» для базового портрета: домашний, естественный кадр (не студия).
 BASE_PORTRAIT_SCENE = (
-    "portrait photo, head and shoulders, soft natural lighting, "
-    "neutral background, looking at the camera, gentle smile"
+    "casual candid head-and-shoulders photo taken at home, soft natural window light, "
+    "relaxed everyday look, gentle natural expression, looking at the camera"
 )
