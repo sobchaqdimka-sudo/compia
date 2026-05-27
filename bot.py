@@ -23,9 +23,11 @@ from aiogram.types import (
 import database
 import imagegen
 import personas
+import videogen
 from ai import (
     build_edit_instruction,
     build_image_prompt,
+    build_video_motion,
     detect_need,
     detect_photo_request,
     generate_checkin,
@@ -311,6 +313,61 @@ def looks_like_photo_request(text):
     return any(trigger in low for trigger in PHOTO_TRIGGERS)
 
 
+# Слова-маркеры просьбы о видео/кружочке.
+VIDEO_TRIGGERS = (
+    "відео", "видео", "кружоч", "кружок", "кружеч", "відос", "видос", "video",
+    "запиши мені", "зніми відео", "видосик",
+)
+
+
+def looks_like_video_request(text):
+    """Похоже ли сообщение на просьбу записать видео-кружочек."""
+    low = (text or "").lower()
+    return any(trigger in low for trigger in VIDEO_TRIGGERS)
+
+
+async def _generate_and_send_circle(message, user_id, look, request_text):
+    """Сделать видео-кружок из базового фото и отправить как video note."""
+    await message.answer("Записую для тебе відео 🎥")
+    await bot.send_chat_action(chat_id=message.chat.id, action="record_video_note")
+    try:
+        motion = await asyncio.to_thread(build_video_motion, look["desc"], request_text)
+        path = await asyncio.to_thread(
+            videogen.generate_circle, look["base_path"], motion, user_id
+        )
+    except Exception:
+        logging.exception("Не удалось создать видео-кружок user_id=%s", user_id)
+        await message.answer("Ой, відео не вийшло цього разу. Спробуймо трохи згодом?")
+        return
+    follow = random.choice(["ну як? 🙈", "ось, спеціально для тебе 💛", "зловив настрій?"])
+    database.add_message(user_id, "assistant", follow)
+    await message.answer_video_note(FSInputFile(path))
+    await message.answer(follow)
+
+
+async def try_handle_mira_video(message, user_id):
+    """Видео-кружочки Миры. Возвращает True, если сообщение обработано здесь."""
+    if not videogen.is_enabled():
+        return False
+    if not looks_like_video_request(message.text):
+        return False
+
+    look = database.get_mira_look(user_id)
+    if look["status"] != "ready":
+        # Нет внешности - сперва попросим описать (тогда появится базовое фото).
+        database.set_mira_look_status(user_id, "awaiting_description")
+        ask = (
+            "Хочеш відеокружечок? 🙈 Спершу скажи, якою ти мене бачиш - "
+            "опиши, аж до одягу, і я буду саме такою."
+        )
+        database.add_message(user_id, "assistant", ask)
+        await message.answer(ask)
+        return True
+
+    await _generate_and_send_circle(message, user_id, look, message.text)
+    return True
+
+
 # Короткие подписи к фото по запросу (чтобы не повторяться каждый раз).
 PHOTO_CAPTIONS = ["ось, тримай 💛", "це для тебе", "ну як тобі?", "спеціально для тебе 😊"]
 
@@ -464,10 +521,13 @@ async def handle_message(message: Message):
             just_switched = True
             logging.info("Онбординг: user_id=%s -> %s", user_id, need)
 
-    # 4.5) Фото Миры: либо просим описать внешность, либо генерируем по запросу.
-    #      Если сообщение обработано здесь (фото/вопрос об описании) — выходим.
-    if persona_key == "mira" and await try_handle_mira_photo(message, user_id, history):
-        return
+    # 4.5) Медиа Миры: видео-кружок или фото. Видео проверяем первым (у него свои
+    #      слова-маркеры). Если сообщение обработано здесь — выходим.
+    if persona_key == "mira":
+        if await try_handle_mira_video(message, user_id):
+            return
+        if await try_handle_mira_photo(message, user_id, history):
+            return
 
     # 5) Получаем ответ от модели. Запрос к Anthropic обычный (не async),
     #    поэтому выносим его в отдельный поток, чтобы бот не «зависал».

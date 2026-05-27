@@ -92,3 +92,16 @@ BASE_PORTRAIT_SCENE = (
     "casual candid head-and-shoulders photo taken at home, soft natural window light, "
     "relaxed everyday look, gentle natural expression, looking at the camera"
 )
+
+# --- Видео-кружочки (image-to-video) ---
+# Модель оживления фото в короткое видео.
+VIDEO_MODEL = "fal-ai/kling-video/v2.1/standard/image-to-video"
+# Длительность клипа в секундах (fal ждёт строку).
+VIDEO_DURATION = "5"
+# Сторона квадрата для Telegram video note (px).
+VIDEO_NOTE_SIZE = 512
+# Базовое «движение» по умолчанию (тихий живой клип, без звука).
+VIDEO_MOTION_DEFAULT = (
+    "she looks at the camera, soft natural smile, subtle head movement, slow blink, "
+    "hair moves slightly, realistic and gentle, minimal motion"
+)

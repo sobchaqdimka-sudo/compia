@@ -286,6 +286,30 @@ def build_edit_instruction(description, request):
     return response.content[0].text.strip()
 
 
+def build_video_motion(description, request):
+    """Короткая англоязычная motion-инструкция для оживления фото в кружочек.
+
+    description — кто она; request — что просил человек (необязательно).
+    """
+    prompt = (
+        "Write a short English motion prompt for an image-to-video model that animates "
+        "a still photo of a woman into a 5-second selfie-style video clip.\n"
+        f"Who she is (any language): {description}\n"
+        f"What the user asked (any language, may be empty): {request}\n\n"
+        "Keep the motion subtle and natural: she looks at the camera, soft smile, "
+        "slight head movement, a slow blink, hair moves a little. If the user asked for "
+        "a small gesture (wink, wave, blow a kiss), include it. Realistic and tasteful. "
+        "Return only the motion prompt, one line."
+    )
+    response = client.messages.create(
+        model=SUMMARY_MODEL,
+        max_tokens=120,
+        system="Ты пишешь motion-промпты для оживления фото в видео.",
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return response.content[0].text.strip()
+
+
 def update_memory(previous_facts, recent_messages):
     """Составить обновлённый «конспект» о пользователе.
 
