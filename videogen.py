@@ -44,11 +44,25 @@ def _download(url, dest):
     return dest
 
 
+def _ffmpeg_exe():
+    """Путь к ffmpeg: системный, иначе бинарник из пакета imageio-ffmpeg."""
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception as exc:
+        raise RuntimeError(
+            "Не найден ffmpeg. Установи: pip install imageio-ffmpeg "
+            "(или brew install ffmpeg)"
+        ) from exc
+
+
 def _to_square_note(src, dest):
     """Обрезать в квадрат (по верху, чтобы лицо осталось в кадре) и перекодировать
     под Telegram video note: h264 / yuv420p, без звука."""
-    if shutil.which("ffmpeg") is None:
-        raise RuntimeError("ffmpeg не установлен (нужен для видео-кружочков)")
     size = VIDEO_NOTE_SIZE
     vf = (
         "crop=w=min(iw\\,ih):h=min(iw\\,ih):x=(iw-min(iw\\,ih))/2:y=0,"
@@ -56,7 +70,7 @@ def _to_square_note(src, dest):
     )
     subprocess.run(
         [
-            "ffmpeg", "-y", "-i", src,
+            _ffmpeg_exe(), "-y", "-i", src,
             "-vf", vf,
             "-c:v", "libx264", "-pix_fmt", "yuv420p",
             "-an", "-movflags", "+faststart",
