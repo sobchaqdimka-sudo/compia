@@ -1,1 +1,13 @@
-.
+# Секреты — токены Telegram и Anthropic
+.env
+
+# База данных SQLite
+*.db
+
+# Кэш и скомпилированные файлы Python
+__pycache__/
+*.pyc
+
+# Виртуальное окружение Python
+.venv/
+venv/

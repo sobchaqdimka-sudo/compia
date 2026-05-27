@@ -1,0 +1,40 @@
+"""Настройки проекта.
+
+Здесь мы один раз читаем секреты и параметры из файла .env,
+чтобы остальной код просто импортировал готовые переменные
+и не лез в .env напрямую.
+"""
+
+import os
+
+from dotenv import load_dotenv
+
+# Загружаем переменные из файла .env в окружение процесса.
+load_dotenv()
+
+# Токены обязательны. Если их нет — лучше сразу упасть с понятной ошибкой,
+# чем получить непонятный сбой где-то позже.
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+
+if not TELEGRAM_TOKEN:
+    raise RuntimeError(
+        "Не задан TELEGRAM_TOKEN. Создай файл .env по образцу .env.example"
+    )
+if not ANTHROPIC_API_KEY:
+    raise RuntimeError(
+        "Не задан ANTHROPIC_API_KEY. Создай файл .env по образцу .env.example"
+    )
+
+# Модель Anthropic. При желании поменяй на "claude-haiku-4-5" — дешевле и быстрее.
+MODEL = "claude-sonnet-4-6"
+
+# Сколько последних сообщений пользователя класть в контекст запроса.
+# (Вся переписка при этом хранится в базе целиком.)
+HISTORY_LIMIT = 20
+
+# Имя файла базы данных SQLite.
+DB_PATH = "companion.db"
+
+# Файл с описанием характера персонажа (system prompt).
+PERSONA_PATH = "persona.txt"
