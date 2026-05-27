@@ -4,13 +4,30 @@
 отправляем в модель и возвращаем текст ответа.
 """
 
+import logging
+
 from anthropic import Anthropic
 
 from config import ANTHROPIC_API_KEY, MODEL, SUMMARY_MODEL
-from personas import build_system_prompt
+from personas import build_system_blocks
 
 # Создаём клиент один раз — он переиспользуется для всех запросов.
 client = Anthropic(api_key=ANTHROPIC_API_KEY)
+
+
+def _log_usage(label, usage):
+    """Записать в лог, сколько токенов ушло и сколько взято из кэша.
+
+    cache_read_input_tokens > 0 означает, что кэш сработал (это дёшево).
+    """
+    logging.info(
+        "%s | вход=%s выход=%s кэш_чтение=%s кэш_запись=%s",
+        label,
+        usage.input_tokens,
+        usage.output_tokens,
+        getattr(usage, "cache_read_input_tokens", 0),
+        getattr(usage, "cache_creation_input_tokens", 0),
+    )
 
 
 def get_reply(persona_key, history, facts="", transition=False):
@@ -23,22 +40,30 @@ def get_reply(persona_key, history, facts="", transition=False):
     transition — True, если это первое сообщение после смены роли (онбординг → друг/коуч):
                  тогда просим модель мягко поприветствовать в новой роли.
     """
-    # Общие правила + характер персоны + память о человеке.
-    system_prompt = build_system_prompt(persona_key, facts)
+    # Общие правила + характер персоны (кэшируется) + память о человеке.
+    system_blocks = build_system_blocks(persona_key, facts)
 
     if transition:
-        system_prompt += (
-            "\n\nЭто твоё первое сообщение в новой роли. Мягко и по-человечески "
-            "продолжи разговор уже в ней, без анкет и громких объявлений. Ненавязчиво "
-            "дай понять, что роль можно сменить в любой момент. Отвечай на языке собеседника."
+        # Разовая подсказка при смене роли — отдельным блоком (без кэша).
+        system_blocks.append(
+            {
+                "type": "text",
+                "text": (
+                    "Это твоё первое сообщение в новой роли. Мягко и по-человечески "
+                    "продолжи разговор уже в ней, без анкет и громких объявлений. "
+                    "Ненавязчиво дай понять, что роль можно сменить в любой момент. "
+                    "Отвечай на языке собеседника."
+                ),
+            }
         )
 
     response = client.messages.create(
         model=MODEL,
         max_tokens=1000,
-        system=system_prompt,
-        messages=history,  # вся переписка для контекста
+        system=system_blocks,
+        messages=history,  # последние сообщения для контекста
     )
+    _log_usage("reply", response.usage)
     # Ответ приходит списком блоков; для текста берём текст первого блока.
     return response.content[0].text
 
@@ -49,7 +74,7 @@ def generate_checkin(persona_key, facts):
     Опираемся на характер персоны и память о человеке. Тон без давления и
     без чувства вины: это забота, а не попытка удержать.
     """
-    system_prompt = build_system_prompt(persona_key, facts)
+    system_blocks = build_system_blocks(persona_key, facts)
 
     instruction = (
         "Человек давно не писал. Напиши ему сам, первым: короткое тёплое сообщение "
@@ -63,9 +88,10 @@ def generate_checkin(persona_key, facts):
     response = client.messages.create(
         model=MODEL,
         max_tokens=300,
-        system=system_prompt,
+        system=system_blocks,
         messages=[{"role": "user", "content": instruction}],
     )
+    _log_usage("checkin", response.usage)
     return response.content[0].text
 
 

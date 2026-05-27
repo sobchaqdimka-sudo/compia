@@ -54,7 +54,7 @@ def _read(filename):
 
 
 def build_system_prompt(persona_key, facts=""):
-    """Собрать инструкцию для модели.
+    """Собрать инструкцию для модели одной строкой.
 
     Склеиваем: общие правила + характер выбранной персоны + память о человеке.
     Если персона неизвестна - откатываемся на персону по умолчанию.
@@ -70,3 +70,34 @@ def build_system_prompt(persona_key, facts=""):
         prompt += "\n\nЩо ти пам'ятаєш про співрозмовника (враховуй це):\n" + facts
 
     return prompt
+
+
+def build_system_blocks(persona_key, facts=""):
+    """Собрать system prompt блоками — для prompt caching.
+
+    Статическая часть (общие правила + характер персоны) идёт отдельным блоком
+    с пометкой cache_control: Anthropic закэширует её и на повторных запросах
+    возьмёт почти бесплатно (экономия ~90% на этой части входа).
+    Память (facts) кладём отдельным блоком БЕЗ кэша, т.к. она иногда меняется,
+    но она маленькая.
+    """
+    if persona_key not in PERSONAS:
+        persona_key = DEFAULT_PERSONA
+
+    static = _read("common.txt") + "\n\n" + _read(PERSONAS[persona_key]["file"])
+
+    blocks = [
+        {
+            "type": "text",
+            "text": static,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    if facts:
+        blocks.append(
+            {
+                "type": "text",
+                "text": "Що ти пам'ятаєш про співрозмовника (враховуй це):\n" + facts,
+            }
+        )
+    return blocks
