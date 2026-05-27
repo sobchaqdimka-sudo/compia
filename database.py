@@ -5,8 +5,9 @@
 """
 
 import sqlite3
+from datetime import datetime
 
-from config import DB_PATH
+from config import CHECKIN_INTERVALS_HOURS, DB_PATH, DEFAULT_CHECKIN_FREQ
 
 
 def _connect():
@@ -62,8 +63,8 @@ def init_db():
     # Запрос идемпотентный: при следующих запусках такие строки уже есть.
     conn.execute(
         """
-        INSERT INTO users (user_id, persona, adult_confirmed)
-        SELECT DISTINCT user_id, 'mira', 1 FROM messages
+        INSERT INTO users (user_id, persona, adult_confirmed, checkin_freq)
+        SELECT DISTINCT user_id, 'mira', 1, 'off' FROM messages
         WHERE user_id NOT IN (SELECT user_id FROM users)
         """
     )
@@ -157,8 +158,12 @@ def _ensure_user(conn, user_id):
     """Создать строку пользователя, если её ещё нет (внутренний помощник).
 
     INSERT OR IGNORE ничего не делает, если строка с таким user_id уже есть.
+    Новым пользователям сразу ставим режим проактива по умолчанию.
     """
-    conn.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+    conn.execute(
+        "INSERT OR IGNORE INTO users (user_id, checkin_freq) VALUES (?, ?)",
+        (user_id, DEFAULT_CHECKIN_FREQ),
+    )
 
 
 def get_persona(user_id):
@@ -205,3 +210,98 @@ def set_adult_confirmed(user_id):
     )
     conn.commit()
     conn.close()
+
+
+# --- Проактивные сообщения («бот пишет первым») ---
+
+def get_checkin_freq(user_id):
+    """Вернуть режим проактивных сообщений: off / rarely / sometimes / often."""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    row = conn.execute(
+        "SELECT checkin_freq FROM users WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    conn.commit()
+    conn.close()
+    return row[0]
+
+
+def set_checkin_freq(user_id, freq):
+    """Запомнить выбранный режим проактивных сообщений."""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    conn.execute(
+        "UPDATE users SET checkin_freq = ? WHERE user_id = ?", (freq, user_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def touch_last_seen(user_id):
+    """Отметить, что пользователь только что был активен (написал сообщение)."""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    conn.execute(
+        "UPDATE users SET last_seen = datetime('now') WHERE user_id = ?", (user_id,)
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_last_checkin(user_id):
+    """Отметить, что бот только что написал этому человеку первым."""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    conn.execute(
+        "UPDATE users SET last_checkin_at = datetime('now') WHERE user_id = ?",
+        (user_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _hours_since(now, ts_text):
+    """Сколько часов прошло с момента ts_text (текст из SQLite) до now."""
+    if ts_text is None:
+        return float("inf")
+    ts = datetime.strptime(ts_text, "%Y-%m-%d %H:%M:%S")
+    return (now - ts).total_seconds() / 3600
+
+
+def get_due_checkin_users():
+    """Вернуть тех, кому пора написать первым: список (user_id, persona, facts).
+
+    Берём только тех, у кого:
+    - проактив включён (не 'off');
+    - есть «конспект» памяти (пишем лишь тем, кого реально помним);
+    - человек уже был активен (last_seen не пустой) и молчит дольше порога;
+    - мы ещё не писали ему первыми с момента его последней активности
+      (чтобы не «долбить» того, кто не вернулся).
+    """
+    conn = _connect()
+    rows = conn.execute(
+        """
+        SELECT u.user_id, u.persona, u.checkin_freq, u.last_seen,
+               u.last_checkin_at, f.facts
+        FROM users u
+        JOIN user_facts f ON f.user_id = u.user_id
+        WHERE u.checkin_freq != 'off' AND u.last_seen IS NOT NULL
+        """
+    ).fetchall()
+    conn.close()
+
+    now = datetime.utcnow()
+    due = []
+    for user_id, persona, freq, last_seen, last_checkin_at, facts in rows:
+        hours = CHECKIN_INTERVALS_HOURS.get(freq)
+        if hours is None:
+            continue
+        # Человек ещё не молчит достаточно долго.
+        if _hours_since(now, last_seen) < hours:
+            continue
+        # Уже писали первыми, а человек с тех пор не возвращался - больше не трогаем.
+        # Тексты дат в формате 'ГГГГ-ММ-ДД ЧЧ:ММ:СС' можно сравнивать как строки.
+        if last_checkin_at is not None and last_checkin_at >= last_seen:
+            continue
+        due.append((user_id, persona, facts))
+    return due

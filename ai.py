@@ -43,6 +43,32 @@ def get_reply(persona_key, history, facts="", transition=False):
     return response.content[0].text
 
 
+def generate_checkin(persona_key, facts):
+    """Сгенерировать тёплое сообщение «бот пишет первым».
+
+    Опираемся на характер персоны и память о человеке. Тон без давления и
+    без чувства вины: это забота, а не попытка удержать.
+    """
+    system_prompt = build_system_prompt(persona_key, facts)
+
+    instruction = (
+        "Человек давно не писал. Напиши ему сам, первым: короткое тёплое сообщение "
+        "с заботой. Можешь мягко опереться на то, что знаешь о нём. "
+        "Очень важно: без давления и без чувства вины. Не спрашивай «почему пропал», "
+        "не упрекай, ничего не требуй и не выпрашивай ответ. Просто по-доброму дай "
+        "знать, что вспомнил(а) о нём и рядом. Коротко, на том языке, на котором он "
+        "обычно пишет."
+    )
+
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=300,
+        system=system_prompt,
+        messages=[{"role": "user", "content": instruction}],
+    )
+    return response.content[0].text
+
+
 def detect_need(history):
     """По разговору определить, что человеку сейчас нужнее.
 

@@ -19,14 +19,23 @@ from aiogram.types import (
 
 import database
 import personas
-from ai import detect_need, get_reply, update_memory
+from ai import detect_need, generate_checkin, get_reply, update_memory
 from config import (
+    CHECKIN_POLL_MINUTES,
     HISTORY_LIMIT,
     MEMORY_UPDATE_EVERY,
     ONBOARDING_MIN_MESSAGES,
     SUMMARY_HISTORY_LIMIT,
     TELEGRAM_TOKEN,
 )
+
+# Подписи режимов проактивных сообщений (для кнопок и текста).
+CHECKIN_LABELS = {
+    "off": "Вимкнено",
+    "rarely": "Рідко",
+    "sometimes": "Іноді",
+    "often": "Часто",
+}
 
 # Простое логирование, чтобы видеть в консоли, что бот работает.
 logging.basicConfig(level=logging.INFO)
@@ -61,6 +70,22 @@ def adult_keyboard():
     )
 
 
+def checkin_keyboard():
+    """Кнопки выбора частоты проактивных сообщений."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Вимкнути", callback_data="checkin:off"),
+                InlineKeyboardButton(text="Рідко", callback_data="checkin:rarely"),
+            ],
+            [
+                InlineKeyboardButton(text="Іноді", callback_data="checkin:sometimes"),
+                InlineKeyboardButton(text="Часто", callback_data="checkin:often"),
+            ],
+        ]
+    )
+
+
 # --- Команды ---
 
 @dp.message(CommandStart())
@@ -80,6 +105,18 @@ async def handle_persona(message: Message):
     await message.answer(
         "Кого тобі хочеться поруч зараз? Обрати можна будь-коли.",
         reply_markup=persona_keyboard(),
+    )
+
+
+@dp.message(Command("checkins"))
+async def handle_checkins(message: Message):
+    """Настройка частоты проактивных сообщений («бот пишет первым»)."""
+    current = database.get_checkin_freq(message.from_user.id)
+    await message.answer(
+        "Я можу інколи писати тобі першим, по-доброму, коли тебе давно не було.\n"
+        f"Зараз: {CHECKIN_LABELS.get(current, current)}. "
+        "Обери, як часто. Вимкнути можна будь-коли.",
+        reply_markup=checkin_keyboard(),
     )
 
 
@@ -127,6 +164,20 @@ async def on_adult_choice(callback: CallbackQuery):
     await callback.answer()
 
 
+@dp.callback_query(F.data.startswith("checkin:"))
+async def on_checkin_choice(callback: CallbackQuery):
+    """Пользователь выбрал частоту проактивных сообщений."""
+    freq = callback.data.split(":", 1)[1]
+    if freq not in CHECKIN_LABELS:
+        await callback.answer()
+        return
+    database.set_checkin_freq(callback.from_user.id, freq)
+    await callback.message.answer(
+        f"Готово. Як часто я пишу першим: {CHECKIN_LABELS[freq]}."
+    )
+    await callback.answer()
+
+
 # --- Обычные сообщения ---
 
 @dp.message()
@@ -139,8 +190,10 @@ async def handle_message(message: Message):
 
     user_id = message.from_user.id
 
-    # 1) Сохраняем сообщение пользователя в базу.
+    # 1) Сохраняем сообщение пользователя и отмечаем его активность
+    #    (это сбрасывает таймер «бот пишет первым»).
     database.add_message(user_id, "user", message.text)
+    database.touch_last_seen(user_id)
 
     # 2) Берём выбранную персону, историю, память и счётчик сообщений.
     persona_key = database.get_persona(user_id)
@@ -194,9 +247,41 @@ async def handle_message(message: Message):
         logging.exception("Не удалось обновить долговременную память")
 
 
+# --- Проактивные сообщения (фоновая задача) ---
+
+async def run_checkins():
+    """Один проход: найти, кому пора написать первым, и отправить сообщение."""
+    due = await asyncio.to_thread(database.get_due_checkin_users)
+    for user_id, persona_key, facts in due:
+        try:
+            # Текст генерируем в отдельном потоке (запрос к Anthropic блокирующий).
+            text = await asyncio.to_thread(generate_checkin, persona_key, facts)
+            await bot.send_message(user_id, text)
+            # Сохраняем как сообщение бота, чтобы сохранить непрерывность диалога.
+            database.add_message(user_id, "assistant", text)
+            database.set_last_checkin(user_id)
+            logging.info("Проактивное сообщение отправлено user_id=%s", user_id)
+        except Exception:
+            logging.exception(
+                "Не удалось отправить проактивное сообщение user_id=%s", user_id
+            )
+
+
+async def checkin_loop():
+    """Фоновый цикл: периодически проверяет, кому пора написать первым."""
+    while True:
+        await asyncio.sleep(CHECKIN_POLL_MINUTES * 60)
+        try:
+            await run_checkins()
+        except Exception:
+            logging.exception("Ошибка в фоновой задаче проактивных сообщений")
+
+
 async def main():
-    """Точка входа: подготовить базу и запустить опрос Telegram."""
+    """Точка входа: подготовить базу, запустить фоновую задачу и опрос Telegram."""
     database.init_db()
+    # Фоновая задача «бот пишет первым» крутится параллельно с приёмом сообщений.
+    asyncio.create_task(checkin_loop())
     await dp.start_polling(bot)
 
 
