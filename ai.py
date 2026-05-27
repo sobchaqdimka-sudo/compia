@@ -13,16 +13,25 @@ from personas import build_system_prompt
 client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
 
-def get_reply(persona_key, history, facts=""):
+def get_reply(persona_key, history, facts="", transition=False):
     """Отправить историю диалога в модель и вернуть текст ответа.
 
     persona_key — ключ выбранной персоны ('onboarding'/'friend'/'coach'/'mira').
     history — список сообщений вида
     {"role": "user"/"assistant", "content": "..."}.
     facts — «конспект» о пользователе из долговременной памяти (может быть пустым).
+    transition — True, если это первое сообщение после смены роли (онбординг → друг/коуч):
+                 тогда просим модель мягко поприветствовать в новой роли.
     """
     # Общие правила + характер персоны + память о человеке.
     system_prompt = build_system_prompt(persona_key, facts)
+
+    if transition:
+        system_prompt += (
+            "\n\nЭто твоё первое сообщение в новой роли. Мягко и по-человечески "
+            "продолжи разговор уже в ней, без анкет и громких объявлений. Ненавязчиво "
+            "дай понять, что роль можно сменить в любой момент. Отвечай на языке собеседника."
+        )
 
     response = client.messages.create(
         model=MODEL,
@@ -32,6 +41,44 @@ def get_reply(persona_key, history, facts=""):
     )
     # Ответ приходит списком блоков; для текста берём текст первого блока.
     return response.content[0].text
+
+
+def detect_need(history):
+    """По разговору определить, что человеку сейчас нужнее.
+
+    Возвращает 'friend', 'coach' или 'unclear'. Романтику (Миру) тут не выбираем
+    никогда — она только по явному выбору человека. Используем дешёвую модель.
+    """
+    # Превращаем переписку в читаемый текст.
+    lines = []
+    for m in history:
+        who = "Человек" if m["role"] == "user" else "Компаньон"
+        lines.append(f"{who}: {m['content']}")
+    transcript = "\n".join(lines)
+
+    prompt = (
+        "Вот разговор с человеком:\n"
+        f"{transcript}\n\n"
+        "Что человеку сейчас нужнее по смыслу разговора:\n"
+        "- friend: тёплый друг, просто быть рядом, поговорить, поддержка;\n"
+        "- coach: помощь разобраться с собой, целями, привычками, двигаться вперёд;\n"
+        "- unclear: пока непонятно, нужно ещё пообщаться.\n"
+        "Романтику или близость не выбирай никогда.\n"
+        "Ответь строго одним словом: friend, coach или unclear."
+    )
+
+    response = client.messages.create(
+        model=SUMMARY_MODEL,
+        max_tokens=10,
+        system="Ты классифицируешь, какая поддержка нужна пользователю.",
+        messages=[{"role": "user", "content": prompt}],
+    )
+    answer = response.content[0].text.strip().lower()
+    if "friend" in answer:
+        return "friend"
+    if "coach" in answer:
+        return "coach"
+    return "unclear"
 
 
 def update_memory(previous_facts, recent_messages):
@@ -57,9 +104,11 @@ def update_memory(previous_facts, recent_messages):
         "Недавняя переписка:\n"
         f"{transcript}\n\n"
         "Обнови краткий список устойчивых фактов о пользователе: имя или как к нему "
-        "обращаться, важные детали жизни, предпочтения, цели, текущее настроение и "
-        "контекст отношений с Мирой. Пиши по пунктам, кратко, только то, что важно "
-        "помнить надолго. Не выдумывай факты. Верни только сам список, без вступлений."
+        "обращаться, важные детали жизни, предпочтения, цели, текущее настроение, "
+        "контекст отношений с компаньоном, а также манеру общения (пишет коротко или "
+        "развёрнуто, любит ли юмор, на какие темы откликается, на каком языке пишет). "
+        "Пиши по пунктам, кратко, только то, что важно помнить надолго. Не выдумывай "
+        "факты. Верни только сам список, без вступлений."
     )
 
     response = client.messages.create(

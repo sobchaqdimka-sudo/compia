@@ -19,10 +19,11 @@ from aiogram.types import (
 
 import database
 import personas
-from ai import get_reply, update_memory
+from ai import detect_need, get_reply, update_memory
 from config import (
     HISTORY_LIMIT,
     MEMORY_UPDATE_EVERY,
+    ONBOARDING_MIN_MESSAGES,
     SUMMARY_HISTORY_LIMIT,
     TELEGRAM_TOKEN,
 )
@@ -141,31 +142,48 @@ async def handle_message(message: Message):
     # 1) Сохраняем сообщение пользователя в базу.
     database.add_message(user_id, "user", message.text)
 
-    # 2) Берём выбранную персону, историю и долговременный «конспект».
+    # 2) Берём выбранную персону, историю, память и счётчик сообщений.
     persona_key = database.get_persona(user_id)
     history = database.get_history(user_id, HISTORY_LIMIT)
     facts = database.get_facts(user_id)
+    user_msg_count = database.count_user_messages(user_id)
 
-    # 3) Показываем статус «печатает...», пока ждём ответ модели.
+    # 3) Показываем статус «печатает...», пока идёт обработка.
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
 
-    # 4) Получаем ответ от модели. Запрос к Anthropic обычный (не async),
+    # 4) Мягкий онбординг: если человек ещё на «знакомстве» и уже немного
+    #    пообщался, тихо определяем, кто ему нужнее — друг или коуч, и
+    #    переключаем персону. Романтику (Миру) тут не выбираем никогда.
+    just_switched = False
+    if persona_key == "onboarding" and user_msg_count >= ONBOARDING_MIN_MESSAGES:
+        try:
+            need = await asyncio.to_thread(detect_need, history)
+            if need in ("friend", "coach"):
+                database.set_persona(user_id, need)
+                persona_key = need
+                just_switched = True
+                logging.info("Онбординг: user_id=%s -> %s", user_id, need)
+        except Exception:
+            logging.exception("Не удалось определить потребность в онбординге")
+
+    # 5) Получаем ответ от модели. Запрос к Anthropic обычный (не async),
     #    поэтому выносим его в отдельный поток, чтобы бот не «зависал».
     try:
-        reply = await asyncio.to_thread(get_reply, persona_key, history, facts)
+        reply = await asyncio.to_thread(
+            get_reply, persona_key, history, facts, just_switched
+        )
     except Exception:
         logging.exception("Ошибка при запросе к Anthropic")
         await message.answer("Ой, щось пішло не так. Спробуй ще раз трохи згодом.")
         return
 
-    # 5) Сохраняем ответ бота и отправляем его пользователю.
+    # 6) Сохраняем ответ бота и отправляем его пользователю.
     database.add_message(user_id, "assistant", reply)
     await message.answer(reply)
 
-    # 6) Долговременная память: раз в MEMORY_UPDATE_EVERY сообщений пользователя
+    # 7) Долговременная память: раз в MEMORY_UPDATE_EVERY сообщений пользователя
     #    обновляем «конспект». Делаем это ПОСЛЕ ответа, чтобы человек не ждал лишнего.
     try:
-        user_msg_count = database.count_user_messages(user_id)
         if user_msg_count % MEMORY_UPDATE_EVERY == 0:
             recent = database.get_history(user_id, SUMMARY_HISTORY_LIMIT)
             new_facts = await asyncio.to_thread(update_memory, facts, recent)
