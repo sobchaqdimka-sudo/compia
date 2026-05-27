@@ -2,16 +2,23 @@
 
 Это точка входа. Файл связывает всё вместе: принимает сообщения,
 обращается к базе данных и к модели, отправляет ответ пользователю.
+Также здесь команда /persona и кнопки выбора персоны с гейтом 18+.
 """
 
 import asyncio
 import logging
 
-from aiogram import Bot, Dispatcher
-from aiogram.filters import CommandStart
-from aiogram.types import Message
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import Command, CommandStart
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 import database
+import personas
 from ai import get_reply, update_memory
 from config import (
     HISTORY_LIMIT,
@@ -28,18 +35,105 @@ bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
 
+# --- Клавиатуры (кнопки под сообщением) ---
+
+def persona_keyboard():
+    """Кнопки выбора персоны. Берём только те, что помечены selectable."""
+    rows = []
+    for key, info in personas.PERSONAS.items():
+        if info["selectable"]:
+            rows.append(
+                [InlineKeyboardButton(text=info["name"], callback_data=f"persona:{key}")]
+            )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def adult_keyboard():
+    """Кнопки подтверждения возраста для персоны 18+."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Мені є 18", callback_data="adult:yes"),
+                InlineKeyboardButton(text="Ще ні", callback_data="adult:no"),
+            ]
+        ]
+    )
+
+
+# --- Команды ---
+
 @dp.message(CommandStart())
 async def handle_start(message: Message):
-    """Ответ на команду /start — приветствие."""
-    await message.answer("Привет! Я рядом. О чём поговорим?")
+    """Ответ на /start. Приветствие ВСЕГДА на украинском (требование продукта)."""
+    # Создаём запись о пользователе (для нового это персона onboarding).
+    database.get_persona(message.from_user.id)
+    await message.answer(
+        "Привіт! Я поряд. Можемо просто поговорити - як ти, що на душі?\n"
+        "Якщо захочеш обрати, хто буде поруч (друг, коуч чи Міра), напиши /persona."
+    )
 
+
+@dp.message(Command("persona"))
+async def handle_persona(message: Message):
+    """Показать кнопки выбора персоны. Сменить можно в любой момент."""
+    await message.answer(
+        "Кого тобі хочеться поруч зараз? Обрати можна будь-коли.",
+        reply_markup=persona_keyboard(),
+    )
+
+
+# --- Нажатия на кнопки ---
+
+@dp.callback_query(F.data.startswith("persona:"))
+async def on_persona_chosen(callback: CallbackQuery):
+    """Пользователь выбрал персону кнопкой."""
+    key = callback.data.split(":", 1)[1]
+    info = personas.PERSONAS.get(key)
+    user_id = callback.from_user.id
+
+    if info is None:
+        await callback.answer()
+        return
+
+    # Персона 18+ (Мира): сначала спрашиваем возраст, если ещё не подтверждён.
+    if info["requires_adult"] and not database.is_adult_confirmed(user_id):
+        await callback.message.answer(
+            "Ця персона для дорослих. Тобі вже виповнилося 18?",
+            reply_markup=adult_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    database.set_persona(user_id, key)
+    await callback.message.answer(
+        f"Готово, тепер поруч {info['name']}. Змінити завжди можна через /persona."
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("adult:"))
+async def on_adult_choice(callback: CallbackQuery):
+    """Ответ на подтверждение возраста (только для Миры)."""
+    choice = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
+
+    if choice == "yes":
+        database.set_adult_confirmed(user_id)
+        database.set_persona(user_id, "mira")
+        await callback.message.answer("Дякую. Тепер поруч Міра 💛")
+    else:
+        await callback.message.answer("Без проблем, лишаємо як є. Нічого не змінюю.")
+    await callback.answer()
+
+
+# --- Обычные сообщения ---
 
 @dp.message()
 async def handle_message(message: Message):
-    """Главный обработчик: на любое текстовое сообщение генерируем ответ персонажа."""
+    """Главный обработчик: на любое текстовое сообщение генерируем ответ персоны."""
     # Бот работает только с текстом. Картинки, стикеры и прочее пока пропускаем.
     if not message.text:
-        await message.answer("Я пока понимаю только текст :)")
+        await message.answer("Поки що я розумію тільки текст :)")
         return
 
     user_id = message.from_user.id
@@ -47,8 +141,8 @@ async def handle_message(message: Message):
     # 1) Сохраняем сообщение пользователя в базу.
     database.add_message(user_id, "user", message.text)
 
-    # 2) Достаём последние сообщения для контекста (включая только что сохранённое)
-    #    и долговременный «конспект» о пользователе.
+    # 2) Берём выбранную персону, историю и долговременный «конспект».
+    persona_key = database.get_persona(user_id)
     history = database.get_history(user_id, HISTORY_LIMIT)
     facts = database.get_facts(user_id)
 
@@ -58,10 +152,10 @@ async def handle_message(message: Message):
     # 4) Получаем ответ от модели. Запрос к Anthropic обычный (не async),
     #    поэтому выносим его в отдельный поток, чтобы бот не «зависал».
     try:
-        reply = await asyncio.to_thread(get_reply, history, facts)
+        reply = await asyncio.to_thread(get_reply, persona_key, history, facts)
     except Exception:
         logging.exception("Ошибка при запросе к Anthropic")
-        await message.answer("Ой, что-то пошло не так. Попробуй ещё раз чуть позже.")
+        await message.answer("Ой, щось пішло не так. Спробуй ще раз трохи згодом.")
         return
 
     # 5) Сохраняем ответ бота и отправляем его пользователю.

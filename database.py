@@ -39,6 +39,34 @@ def init_db():
         )
         """
     )
+    # Состояние пользователя: выбранная персона, подтверждение 18+,
+    # настройка проактивных сообщений и отметки активности.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            user_id         INTEGER PRIMARY KEY,
+            persona         TEXT    NOT NULL DEFAULT 'onboarding',
+            adult_confirmed INTEGER NOT NULL DEFAULT 0,
+            checkin_freq    TEXT    NOT NULL DEFAULT 'off',
+            last_seen       TEXT,
+            last_checkin_at TEXT,
+            created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.commit()
+
+    # Миграция: всех, кто уже общался с ботом (есть в messages), но кого ещё
+    # нет в users, переносим на Миру с подтверждённым 18+. Так старые
+    # пользователи не теряют свой романтический контекст и не падают в онбординг.
+    # Запрос идемпотентный: при следующих запусках такие строки уже есть.
+    conn.execute(
+        """
+        INSERT INTO users (user_id, persona, adult_confirmed)
+        SELECT DISTINCT user_id, 'mira', 1 FROM messages
+        WHERE user_id NOT IN (SELECT user_id FROM users)
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -118,6 +146,62 @@ def save_facts(user_id, facts):
             updated_at = excluded.updated_at
         """,
         (user_id, facts),
+    )
+    conn.commit()
+    conn.close()
+
+
+# --- Состояние пользователя (персона, возраст) ---
+
+def _ensure_user(conn, user_id):
+    """Создать строку пользователя, если её ещё нет (внутренний помощник).
+
+    INSERT OR IGNORE ничего не делает, если строка с таким user_id уже есть.
+    """
+    conn.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+
+
+def get_persona(user_id):
+    """Вернуть ключ выбранной персоны. Для нового пользователя - 'onboarding'."""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    row = conn.execute(
+        "SELECT persona FROM users WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    conn.commit()
+    conn.close()
+    return row[0]
+
+
+def set_persona(user_id, persona):
+    """Запомнить выбранную персону пользователя."""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    conn.execute(
+        "UPDATE users SET persona = ? WHERE user_id = ?", (persona, user_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def is_adult_confirmed(user_id):
+    """Подтвердил ли пользователь, что ему есть 18 лет."""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    row = conn.execute(
+        "SELECT adult_confirmed FROM users WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    conn.commit()
+    conn.close()
+    return bool(row[0])
+
+
+def set_adult_confirmed(user_id):
+    """Отметить, что возраст подтверждён (18+)."""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    conn.execute(
+        "UPDATE users SET adult_confirmed = 1 WHERE user_id = ?", (user_id,)
     )
     conn.commit()
     conn.close()

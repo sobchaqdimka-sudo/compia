@@ -46,5 +46,5 @@ SUMMARY_MODEL = "claude-haiku-4-5"
 # Имя файла базы данных SQLite.
 DB_PATH = "companion.db"
 
-# Файл с описанием характера персонажа (system prompt).
-PERSONA_PATH = "persona.txt"
+# Папка с текстами персон: по файлу на персону + common.txt с общими правилами.
+PERSONAS_DIR = "personas"
