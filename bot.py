@@ -7,6 +7,7 @@
 
 import asyncio
 import logging
+import re
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
@@ -228,6 +229,36 @@ async def on_checkin_choice(callback: CallbackQuery):
     await callback.answer()
 
 
+# --- Отправка ответа «живыми» сообщениями ---
+
+def split_into_bubbles(text, max_bubbles=4):
+    """Разбить ответ модели на отдельные короткие реплики.
+
+    Модель иногда отдаёт текст в несколько строк/абзацев. Каждую непустую
+    строку делаем отдельным сообщением — так уходят пустые строки и переписка
+    выглядит как живой texting. Чтобы не спамить, хвост сверх лимита склеиваем.
+    """
+    parts = [p.strip() for p in re.split(r"\n+", text or "") if p.strip()]
+    if len(parts) <= max_bubbles:
+        return parts
+    return parts[: max_bubbles - 1] + [" ".join(parts[max_bubbles - 1 :])]
+
+
+async def send_bubbles(chat_id, text):
+    """Отправить ответ несколькими сообщениями, как живой человек в мессенджере.
+
+    Между репликами короткая пауза и статус «печатает», чтобы ощущалось живо.
+    """
+    bubbles = split_into_bubbles(text)
+    if not bubbles:
+        bubbles = ["..."]
+    for i, bubble in enumerate(bubbles):
+        if i > 0:
+            await bot.send_chat_action(chat_id=chat_id, action="typing")
+            await asyncio.sleep(min(1.5, 0.4 + len(bubble) / 70))
+        await bot.send_message(chat_id, bubble)
+
+
 # --- Обычные сообщения ---
 
 @dp.message()
@@ -280,9 +311,9 @@ async def handle_message(message: Message):
         await message.answer("Ой, щось пішло не так. Спробуй ще раз трохи згодом.")
         return
 
-    # 6) Сохраняем ответ бота и отправляем его пользователю.
+    # 6) Сохраняем ответ бота и отправляем его пользователю «живыми» репликами.
     database.add_message(user_id, "assistant", reply)
-    await message.answer(reply)
+    await send_bubbles(message.chat.id, reply)
 
     # 7) Долговременная память: раз в MEMORY_UPDATE_EVERY сообщений пользователя
     #    обновляем «конспект». Делаем это ПОСЛЕ ответа, чтобы человек не ждал лишнего.
@@ -306,7 +337,7 @@ async def run_checkins():
         try:
             # Текст генерируем в отдельном потоке (запрос к Anthropic блокирующий).
             text = await asyncio.to_thread(generate_checkin, persona_key, facts)
-            await bot.send_message(user_id, text)
+            await send_bubbles(user_id, text)
             # Сохраняем как сообщение бота, чтобы сохранить непрерывность диалога.
             database.add_message(user_id, "assistant", text)
             database.set_last_checkin(user_id)
