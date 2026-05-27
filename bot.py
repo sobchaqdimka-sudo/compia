@@ -212,7 +212,7 @@ async def on_adult_choice(callback: CallbackQuery):
         await callback.message.answer("Дякую. Тепер поруч Міра 💛")
         await send_persona_intro(callback.message, user_id, "mira")
     else:
-        await callback.message.answer("Без проблем, лишаємо як є. Нічого не змінюю.")
+        await callback.message.answer("Добре, без поспіху 🙂 Я поруч у будь-якому разі.")
     await callback.answer()
 
 
@@ -297,13 +297,34 @@ async def handle_message(message: Message):
     if persona_key == "onboarding" and user_msg_count >= ONBOARDING_MIN_MESSAGES:
         try:
             need = await asyncio.to_thread(detect_need, history)
-            if need in ("friend", "coach"):
-                database.set_persona(user_id, need)
-                persona_key = need
-                just_switched = True
-                logging.info("Онбординг: user_id=%s -> %s", user_id, need)
         except Exception:
             logging.exception("Не удалось определить потребность в онбординге")
+            need = "unclear"
+
+        if need == "romantic":
+            if database.is_adult_confirmed(user_id):
+                database.set_persona(user_id, "mira")
+                persona_key = "mira"
+                just_switched = True
+                logging.info("Онбординг: user_id=%s -> mira", user_id)
+            else:
+                # Человек тянется к близости. Предлагаем Миру через гейт 18+.
+                # Другом ставим как мягкий дефолт, чтобы он не застрял в онбординге.
+                database.set_persona(user_id, "friend")
+                invite = (
+                    "Здається, тобі хочеться когось по-справжньому близького, свого 💛 "
+                    "Для цього в мене є Міра - тепла й ніжна супутниця. Тільки це "
+                    "доросла історія, тож скажи: тобі вже виповнилося 18?"
+                )
+                database.add_message(user_id, "assistant", invite)
+                await message.answer(invite, reply_markup=adult_keyboard())
+                logging.info("Онбординг: user_id=%s -> предложена Мира (гейт 18+)", user_id)
+                return
+        elif need in ("friend", "coach"):
+            database.set_persona(user_id, need)
+            persona_key = need
+            just_switched = True
+            logging.info("Онбординг: user_id=%s -> %s", user_id, need)
 
     # 5) Получаем ответ от модели. Запрос к Anthropic обычный (не async),
     #    поэтому выносим его в отдельный поток, чтобы бот не «зависал».
