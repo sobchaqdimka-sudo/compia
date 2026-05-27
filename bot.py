@@ -70,6 +70,16 @@ def adult_keyboard():
     )
 
 
+def start_keyboard():
+    """Две опции на старте: выбрать персону сразу или просто пообщаться."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Обрати, хто поруч", callback_data="start:choose")],
+            [InlineKeyboardButton(text="Просто поговорити", callback_data="start:chat")],
+        ]
+    )
+
+
 def checkin_keyboard():
     """Кнопки выбора частоты проактивных сообщений."""
     return InlineKeyboardMarkup(
@@ -90,12 +100,17 @@ def checkin_keyboard():
 
 @dp.message(CommandStart())
 async def handle_start(message: Message):
-    """Ответ на /start. Приветствие ВСЕГДА на украинском (требование продукта)."""
+    """Ответ на /start. Приветствие ВСЕГДА на украинском (требование продукта).
+
+    Даём две опции: выбрать персону сразу или просто пообщаться (мягкий онбординг).
+    """
     # Создаём запись о пользователе (для нового это персона onboarding).
     database.get_persona(message.from_user.id)
     await message.answer(
-        "Привіт! Я поряд. Можемо просто поговорити - як ти, що на душі?\n"
-        "Якщо захочеш обрати, хто буде поруч (друг, коуч чи Міра), напиши /persona."
+        "Привіт! Я поряд 💛\n"
+        "Можемо почати по-різному: або одразу обереш, хто буде поруч "
+        "(друг, коуч чи Міра), або просто поговоримо, і я сам відчую, що тобі ближче.",
+        reply_markup=start_keyboard(),
     )
 
 
@@ -121,6 +136,22 @@ async def handle_checkins(message: Message):
 
 
 # --- Нажатия на кнопки ---
+
+@dp.callback_query(F.data.startswith("start:"))
+async def on_start_choice(callback: CallbackQuery):
+    """Выбор на старте: сразу выбрать персону или просто пообщаться."""
+    choice = callback.data.split(":", 1)[1]
+    if choice == "choose":
+        await callback.message.answer(
+            "Добре. Кого тобі хочеться поруч?",
+            reply_markup=persona_keyboard(),
+        )
+    else:  # chat — остаёмся в мягком онбординге
+        await callback.message.answer(
+            "Тоді просто розкажи, як ти? Що зараз на душі?"
+        )
+    await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("persona:"))
 async def on_persona_chosen(callback: CallbackQuery):
