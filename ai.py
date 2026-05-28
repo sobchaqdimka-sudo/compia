@@ -38,7 +38,7 @@ def _log_usage(label, usage):
     )
 
 
-def get_reply(persona_key, history, facts="", transition=False):
+def get_reply(persona_key, history, facts="", transition=False, image=None):
     """Отправить историю диалога в модель и вернуть текст ответа.
 
     persona_key — ключ выбранной персоны ('onboarding'/'friend'/'coach'/'mira').
@@ -47,6 +47,8 @@ def get_reply(persona_key, history, facts="", transition=False):
     facts — «конспект» о пользователе из долговременной памяти (может быть пустым).
     transition — True, если это первое сообщение после смены роли (онбординг → друг/коуч):
                  тогда просим модель мягко поприветствовать в новой роли.
+    image — необязательно. Если задано, к ПОСЛЕДНЕМУ сообщению пользователя прицепляем
+            картинку, чтобы модель её увидела. Формат: {"b64": str, "media_type": str}.
     """
     # Общие правила + характер персоны (кэшируется) + память о человеке.
     system_blocks = build_system_blocks(persona_key, facts)
@@ -69,11 +71,33 @@ def get_reply(persona_key, history, facts="", transition=False):
             }
         )
 
+    # Если для текущего хода есть картинка, прицепляем её к последнему сообщению
+    # пользователя как content-блок image. Так модель «видит» фото.
+    messages = history
+    if image and history and history[-1]["role"] == "user":
+        last_text = history[-1]["content"]
+        messages = history[:-1] + [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": image["media_type"],
+                            "data": image["b64"],
+                        },
+                    },
+                    {"type": "text", "text": last_text or "(фото)"},
+                ],
+            }
+        ]
+
     response = client.messages.create(
         model=PERSONA_MODELS.get(persona_key, MODEL),
         max_tokens=1000,
         system=system_blocks,
-        messages=history,  # последние сообщения для контекста
+        messages=messages,
     )
     _log_usage("reply", response.usage)
     # Ответ приходит списком блоков; для текста берём текст первого блока.

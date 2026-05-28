@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import base64
 import logging
 import random
 import re
@@ -539,19 +540,46 @@ async def try_handle_mira_media(message, user_id, history, facts):
 
 # --- Обычные сообщения ---
 
+async def _photo_payload(photo_size):
+    """Скачать фото из Telegram и закодировать в base64 для Claude vision."""
+    buf = await bot.download(photo_size)
+    data = buf.read() if hasattr(buf, "read") else bytes(buf)
+    return {
+        "b64": base64.b64encode(data).decode("ascii"),
+        "media_type": "image/jpeg",
+    }
+
+
 @dp.message()
 async def handle_message(message: Message):
-    """Главный обработчик: на любое текстовое сообщение генерируем ответ персоны."""
-    # Бот работает только с текстом. Картинки, стикеры и прочее пока пропускаем.
-    if not message.text:
-        await message.answer("Поки що я розумію тільки текст :)")
+    """Главный обработчик: на текст или фото от пользователя — ответ персоны."""
+    # Принимаем текст и фото (с подписью или без); прочее (стикеры, голосовые)
+    # пока пропускаем.
+    if not message.text and not message.photo:
+        await message.answer("Поки що я розумію тільки текст і фото :)")
         return
 
     user_id = message.from_user.id
 
+    # Если пришло фото — скачиваем и готовим payload для модели; текст пользователя
+    # формируем из caption либо ставим естественную «подсказку», без скобочных тегов.
+    image_payload = None
+    if message.photo:
+        try:
+            image_payload = await _photo_payload(message.photo[-1])
+        except Exception:
+            logging.exception("Не удалось скачать фото user_id=%s", user_id)
+        caption = (message.caption or "").strip()
+        if image_payload:
+            user_text = "Я надіслав тобі фото." + (f" {caption}" if caption else "")
+        else:
+            user_text = caption or "Я надіслав тобі фото, але воно не дійшло."
+    else:
+        user_text = message.text
+
     # 1) Сохраняем сообщение пользователя и отмечаем его активность
     #    (это сбрасывает таймер «бот пишет первым»).
-    database.add_message(user_id, "user", message.text)
+    database.add_message(user_id, "user", user_text)
     database.touch_last_seen(user_id)
 
     # 2) Берём выбранную персону, историю, память и счётчик сообщений.
@@ -563,11 +591,19 @@ async def handle_message(message: Message):
     # 3) Показываем статус «печатает...», пока идёт обработка.
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
 
+    # Если человек прислал фото, пока ждали описание внешности Миры - это явно
+    # не описание; сбрасываем ожидание, дальше идёт обычная реакция персоны.
+    if image_payload and persona_key == "mira":
+        look = database.get_mira_look(user_id)
+        if look["status"] == "awaiting_description":
+            database.set_mira_look_status(user_id, "none")
+
     # 4) Мягкий онбординг: если человек ещё на «знакомстве» и уже немного
     #    пообщался, тихо определяем, кто ему нужнее — друг или коуч, и
     #    переключаем персону. Романтику (Миру) тут не выбираем никогда.
+    #    Для входящих фото детекцию пропускаем — фото мало говорит о потребности.
     just_switched = False
-    if persona_key == "onboarding" and user_msg_count >= ONBOARDING_MIN_MESSAGES:
+    if image_payload is None and persona_key == "onboarding" and user_msg_count >= ONBOARDING_MIN_MESSAGES:
         try:
             need = await asyncio.to_thread(detect_need, history)
         except Exception:
@@ -600,17 +636,18 @@ async def handle_message(message: Message):
             logging.info("Онбординг: user_id=%s -> %s", user_id, need)
 
     # 4.5) Медиа Миры (фото / тихий кружок / говорящий кружок). Единый диспетчер.
-    #      Если сообщение обработано здесь — выходим.
-    if persona_key == "mira" and await try_handle_mira_media(
+    #      Для входящих фото пропускаем (это контент К ней, а не просьба ОТ неё).
+    if image_payload is None and persona_key == "mira" and await try_handle_mira_media(
         message, user_id, history, facts
     ):
         return
 
     # 5) Получаем ответ от модели. Запрос к Anthropic обычный (не async),
     #    поэтому выносим его в отдельный поток, чтобы бот не «зависал».
+    #    Если есть фото — передаём его в модель, чтобы персона его «увидела».
     try:
         reply = await asyncio.to_thread(
-            get_reply, persona_key, history, facts, just_switched
+            get_reply, persona_key, history, facts, just_switched, image_payload
         )
     except Exception:
         logging.exception("Ошибка при запросе к Anthropic")
