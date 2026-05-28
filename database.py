@@ -69,6 +69,11 @@ def init_db():
         "mira_look_desc": "TEXT",          # описание внешности словами пользователя
         "mira_base_path": "TEXT",          # путь к каноническому портрету (референс)
         "photos_made": "INTEGER NOT NULL DEFAULT 0",  # сколько фото уже сгенерили
+        # Имя Миры для этого пользователя.
+        # status: 'unrevealed' (имя ещё не названо), 'nicknamed' (он дал ей имя),
+        # 'revealed' (отказался дать своё, она назвалась Мирой).
+        "mira_name_status": "TEXT NOT NULL DEFAULT 'unrevealed'",
+        "mira_nickname": "TEXT",  # имя, которое дал пользователь (если дал)
     }
     for name, decl in mira_columns.items():
         if name not in existing:
@@ -269,6 +274,43 @@ def save_mira_look(user_id, desc, base_path):
         "UPDATE users SET mira_look_desc = ?, mira_base_path = ?, "
         "mira_look_status = 'ready' WHERE user_id = ?",
         (desc, base_path, user_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_mira_name_state(user_id):
+    """Состояние имени Миры для пользователя: {'status': ..., 'nickname': ...}."""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    row = conn.execute(
+        "SELECT mira_name_status, mira_nickname FROM users WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    conn.commit()
+    conn.close()
+    return {"status": row[0], "nickname": row[1]}
+
+
+def set_mira_nickname(user_id, nickname):
+    """Запомнить никнейм, который пользователь дал Мире, и сменить статус."""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    conn.execute(
+        "UPDATE users SET mira_nickname = ?, mira_name_status = 'nicknamed' "
+        "WHERE user_id = ?",
+        (nickname, user_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_mira_name_revealed(user_id):
+    """Пользователь отказался дать имя — Мира открывается как Мира."""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    conn.execute(
+        "UPDATE users SET mira_name_status = 'revealed' WHERE user_id = ?", (user_id,)
     )
     conn.commit()
     conn.close()

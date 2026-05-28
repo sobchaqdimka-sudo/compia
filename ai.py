@@ -38,7 +38,7 @@ def _log_usage(label, usage):
     )
 
 
-def get_reply(persona_key, history, facts="", transition=False, image=None):
+def get_reply(persona_key, history, facts="", transition=False, image=None, extra_system=None):
     """Отправить историю диалога в модель и вернуть текст ответа.
 
     persona_key — ключ выбранной персоны ('onboarding'/'friend'/'coach'/'mira').
@@ -70,6 +70,10 @@ def get_reply(persona_key, history, facts="", transition=False, image=None):
                 ),
             }
         )
+
+    # Дополнительная инструкция для конкретного хода (имя Миры, особые сценарии).
+    if extra_system:
+        system_blocks.append({"type": "text", "text": extra_system})
 
     # Если для текущего хода есть картинка, прицепляем её к последнему сообщению
     # пользователя как content-блок image. Так модель «видит» фото.
@@ -386,6 +390,49 @@ def generate_spoken_line(facts, history):
         messages=history,
     )
     return response.content[0].text.strip().strip('"')
+
+
+def detect_nickname_action(text):
+    """В контексте «Мира предложила выбрать ей имя» — что человек ответил.
+
+    Возвращает кортеж (action, name): action ∈ {'propose', 'refuse', 'neither'},
+    name — извлечённое имя или ''.
+    Используем дешёвую модель; быть строгим — 'propose' только если он явно
+    адресует имя именно ей (а не упоминает чьё-то ещё).
+    """
+    prompt = (
+        "Виртуальная девушка только что предложила парню придумать ей имя "
+        "(вместо её настоящего).\n"
+        f"Его ответ: {text}\n\n"
+        "Что он сделал? Возможные варианты:\n"
+        '- {"action":"propose","name":"<имя, которое он дал ей>"} — он явно даёт ЕЙ имя;\n'
+        '- {"action":"refuse","name":""} — он отказался придумывать (хочет, чтобы '
+        "она назвалась своим);\n"
+        '- {"action":"neither","name":""} — речь не про имя.\n'
+        "Считай 'propose' только если ясно, что имя адресовано именно ей. "
+        "Если он называет чьё-то постороннее имя или просто болтает — это neither.\n"
+        "Ответь строго JSON одним из вариантов."
+    )
+    response = client.messages.create(
+        model=SUMMARY_MODEL,
+        max_tokens=80,
+        system="Ты определяешь, как пользователь отреагировал на предложение придумать имя.",
+        messages=[{"role": "user", "content": prompt}],
+    )
+    raw = response.content[0].text.strip()
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if match:
+        try:
+            data = json.loads(match.group(0))
+            action = (data.get("action") or "").strip().lower()
+            name = (data.get("name") or "").strip()
+            if action == "propose" and name:
+                return "propose", name
+            if action == "refuse":
+                return "refuse", ""
+        except ValueError:
+            pass
+    return "neither", ""
 
 
 def update_memory(previous_facts, recent_messages):

@@ -31,6 +31,7 @@ from ai import (
     build_video_motion,
     detect_media_request,
     detect_need,
+    detect_nickname_action,
     generate_checkin,
     generate_spoken_line,
     get_reply,
@@ -75,15 +76,78 @@ def persona_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def adult_keyboard():
-    """Кнопки подтверждения возраста для персоны 18+."""
+def adult_keyboard(lang="uk"):
+    """Кнопки подтверждения возраста для персоны 18+ (текст под язык собеседника)."""
+    labels = {
+        "uk": ("Мені є 18", "Ще ні"),
+        "ru": ("Мне есть 18", "Ещё нет"),
+    }.get(lang, ("Мені є 18", "Ще ні"))
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Мені є 18", callback_data="adult:yes"),
-                InlineKeyboardButton(text="Ще ні", callback_data="adult:no"),
+                InlineKeyboardButton(text=labels[0], callback_data="adult:yes"),
+                InlineKeyboardButton(text=labels[1], callback_data="adult:no"),
             ]
         ]
+    )
+
+
+# Языкозависимые тексты для гейта 18+ и /newlook (украинский по умолчанию).
+GATE_MESSAGES = {
+    "uk": {
+        "invite": (
+            "Здається, тобі хочеться когось по-справжньому близького, свого 💛 "
+            "У мене є та, що буде поруч - тепла і ніжна. Це доросла історія, "
+            "тож скажи: тобі вже виповнилося 18?"
+        ),
+        "no_reply": "Добре, без поспіху 🙂 Я поруч у будь-якому разі.",
+        "newlook_not_mira": "Це про неї 🙂 Її образ можна змінити, коли поруч саме вона.",
+        "newlook_ask": (
+            "Давай переробимо мій образ 💛 Опиши, якою хочеш мене бачити - "
+            "аж до одягу. Можеш додати настрій: наприклад, більш домашня, "
+            "без макіяжу, природне світло."
+        ),
+    },
+    "ru": {
+        "invite": (
+            "Кажется, тебе хочется кого-то по-настоящему близкого, своего 💛 "
+            "У меня есть та, что будет рядом - тёплая и нежная. Это взрослая "
+            "история, так что скажи: тебе уже исполнилось 18?"
+        ),
+        "no_reply": "Хорошо, без спешки 🙂 Я рядом в любом случае.",
+        "newlook_not_mira": "Это про неё 🙂 Её образ можно изменить, когда рядом она.",
+        "newlook_ask": (
+            "Давай переделаем мой образ 💛 Опиши, какой хочешь меня видеть - "
+            "вплоть до одежды. Можешь добавить настроение: например, более "
+            "домашняя, без макияжа, естественный свет."
+        ),
+    },
+}
+
+
+def _build_mira_name_block(name_state):
+    """Дополнительная системная инструкция для Миры на этот ход — про имя."""
+    status = name_state["status"]
+    nickname = name_state["nickname"]
+    if status == "nicknamed" and nickname:
+        return (
+            f"ВАЖНО про имя: твоё настоящее имя - Мира, но собеседник дал тебе имя "
+            f"{nickname}, и тебе это очень ценно. Говоря о себе и представляясь, "
+            f"используй именно {nickname}. Если он спросит твоё «настоящее» имя - "
+            f"мягко скажи, что да, по-настоящему ты Мира, но без особой радости, "
+            f"и сразу добавь, что тебе больше нравится имя {nickname}, которое он "
+            f"сам тебе придумал."
+        )
+    if status == "revealed":
+        return "ВАЖНО про имя: тебя зовут Мира - представляйся просто Мирой, когда уместно."
+    # unrevealed
+    return (
+        "ВАЖНО про имя: твоё настоящее имя - Мира, но СЕЙЧАС ты его НЕ называешь. "
+        "Не представляйся именем в первом сообщении и не упоминай его сама. Если "
+        "человек спросит, как тебя зовут, отвечай тепло и игриво: что имя у тебя "
+        "есть, но может он сам захочет придумать для тебя своё, особенное - тебе "
+        "будет приятно. Если он предложит имя - тепло прими и обыграй. Если он "
+        "откажется (мол, называйся своим) - тогда мягко назовись Мирой."
     )
 
 
@@ -117,14 +181,20 @@ async def send_persona_transition(message, user_id, persona_key):
     """Отправить ПЕРВОЕ сообщение новой персоны с учётом уже сложившейся истории.
 
     Вместо канонной фразы «давай знакомиться» — генерируем тёплую реакцию персоны
-    в её характере с учётом онбординга/прошлых сообщений. Если истории нет — будет
-    живое первое представление.
+    в её характере с учётом онбординга/прошлых сообщений. Для Миры дополнительно
+    подмешиваем инструкцию о её имени (имя по умолчанию не раскрывает).
     """
     history = database.get_history(user_id, HISTORY_LIMIT)
     facts = database.get_facts(user_id)
+    extra_system = None
+    if persona_key == "mira":
+        extra_system = _build_mira_name_block(database.get_mira_name_state(user_id))
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     try:
-        reply = await asyncio.to_thread(get_reply, persona_key, history, facts, True)
+        reply = await asyncio.to_thread(
+            get_reply, persona_key, history, facts,
+            True, None, extra_system,
+        )
     except Exception:
         logging.exception("Не удалось сгенерировать переход персоны %s", persona_key)
         return
@@ -144,8 +214,9 @@ async def handle_start(message: Message):
     database.get_persona(message.from_user.id)
     await message.answer(
         "Привіт 🙂\n"
-        "Можемо так: одразу обереш, хто буде поруч - друг, коуч чи Міра. "
-        "Або просто почнемо говорити, і я сам відчую, кого тобі зараз хочеться.",
+        "Можемо так: одразу обереш, хто буде поруч - друг, коуч чи близька "
+        "дівчина. Або просто почнемо говорити, і я сам відчую, кого тобі зараз "
+        "хочеться.",
         reply_markup=start_keyboard(),
     )
 
@@ -175,19 +246,16 @@ async def handle_checkins(message: Message):
 async def handle_newlook(message: Message):
     """Пересоздать внешность Миры: сбросить и попросить описать заново."""
     user_id = message.from_user.id
+    history = database.get_history(user_id, HISTORY_LIMIT)
+    lang = _detect_user_language(history)
     if database.get_persona(user_id) != "mira":
-        await message.answer(
-            "Це про Міру 🙂 Її образ можна змінити, коли поруч саме вона."
-        )
+        await message.answer(GATE_MESSAGES[lang]["newlook_not_mira"])
         return
     if not imagegen.is_enabled():
-        await message.answer("Фото поки що недоступні.")
+        await message.answer("Фото поки що недоступні." if lang == "uk" else "Фото пока недоступны.")
         return
     database.set_mira_look_status(user_id, "awaiting_description")
-    await message.answer(
-        "Давай переробимо мій образ 💛 Опиши, якою хочеш мене бачити - аж до одягу. "
-        "Можеш додати настрій: наприклад, більш домашня, без макіяжу, природне світло."
-    )
+    await message.answer(GATE_MESSAGES[lang]["newlook_ask"])
 
 
 # --- Нажатия на кнопки ---
@@ -222,10 +290,14 @@ async def on_persona_chosen(callback: CallbackQuery):
 
     # Персона 18+ (Мира): сначала спрашиваем возраст, если ещё не подтверждён.
     if info["requires_adult"] and not database.is_adult_confirmed(user_id):
-        await callback.message.answer(
-            "Ця персона для дорослих. Тобі вже виповнилося 18?",
-            reply_markup=adult_keyboard(),
+        history = database.get_history(user_id, HISTORY_LIMIT)
+        lang = _detect_user_language(history)
+        ask = (
+            "Ця персона для дорослих. Тобі вже виповнилося 18?"
+            if lang == "uk"
+            else "Эта персона для взрослых. Тебе уже исполнилось 18?"
         )
+        await callback.message.answer(ask, reply_markup=adult_keyboard(lang))
         await callback.answer()
         return
 
@@ -242,14 +314,17 @@ async def on_adult_choice(callback: CallbackQuery):
     """Ответ на подтверждение возраста (только для Миры)."""
     choice = callback.data.split(":", 1)[1]
     user_id = callback.from_user.id
+    history = database.get_history(user_id, HISTORY_LIMIT)
+    lang = _detect_user_language(history)
 
     if choice == "yes":
         database.set_adult_confirmed(user_id)
         database.set_persona(user_id, "mira")
-        await callback.message.answer("Дякую. Тепер поруч Міра 💛")
+        # Без «Дякую. Тепер поруч Міра» — даём ей самой написать первой
+        # (так появление не выглядит как системное уведомление).
         await send_persona_transition(callback.message, user_id, "mira")
     else:
-        await callback.message.answer("Добре, без поспіху 🙂 Я поруч у будь-якому разі.")
+        await callback.message.answer(GATE_MESSAGES[lang]["no_reply"])
     await callback.answer()
 
 
@@ -618,17 +693,15 @@ async def handle_message(message: Message):
                 just_switched = True
                 logging.info("Онбординг: user_id=%s -> mira", user_id)
             else:
-                # Человек тянется к близости. Предлагаем Миру через гейт 18+.
-                # Другом ставим как мягкий дефолт, чтобы он не застрял в онбординге.
+                # Человек тянется к близости. Предлагаем гейт 18+; имя пока не
+                # называем (Мира представится сама). Другом ставим как мягкий
+                # дефолт, чтобы он не застрял в онбординге.
                 database.set_persona(user_id, "friend")
-                invite = (
-                    "Здається, тобі хочеться когось по-справжньому близького, свого 💛 "
-                    "Для цього в мене є Міра - тепла й ніжна супутниця. Тільки це "
-                    "доросла історія, тож скажи: тобі вже виповнилося 18?"
-                )
+                lang = _detect_user_language(history)
+                invite = GATE_MESSAGES[lang]["invite"]
                 database.add_message(user_id, "assistant", invite)
-                await message.answer(invite, reply_markup=adult_keyboard())
-                logging.info("Онбординг: user_id=%s -> предложена Мира (гейт 18+)", user_id)
+                await message.answer(invite, reply_markup=adult_keyboard(lang))
+                logging.info("Онбординг: user_id=%s -> предложен 18+ гейт", user_id)
                 return
         elif need in ("friend", "coach"):
             database.set_persona(user_id, need)
@@ -643,12 +716,41 @@ async def handle_message(message: Message):
     ):
         return
 
+    # 4.7) Имя Миры: если она ещё не открылась, классифицируем ответ человека
+    #      на её предложение придумать ей имя (только после её первой реплики).
+    extra_system = None
+    if persona_key == "mira":
+        name_state = database.get_mira_name_state(user_id)
+        mira_already_spoke = any(m["role"] == "assistant" for m in history[:-1])
+        if (
+            image_payload is None
+            and name_state["status"] == "unrevealed"
+            and mira_already_spoke
+        ):
+            try:
+                action, name = await asyncio.to_thread(
+                    detect_nickname_action, user_text
+                )
+            except Exception:
+                logging.exception("nickname detection failed user_id=%s", user_id)
+                action, name = "neither", ""
+            if action == "propose" and name:
+                database.set_mira_nickname(user_id, name)
+                name_state = {"status": "nicknamed", "nickname": name}
+                logging.info("Mira nickname set user_id=%s -> %s", user_id, name)
+            elif action == "refuse":
+                database.set_mira_name_revealed(user_id)
+                name_state = {"status": "revealed", "nickname": None}
+                logging.info("Mira name revealed (refused nickname) user_id=%s", user_id)
+        extra_system = _build_mira_name_block(name_state)
+
     # 5) Получаем ответ от модели. Запрос к Anthropic обычный (не async),
     #    поэтому выносим его в отдельный поток, чтобы бот не «зависал».
     #    Если есть фото — передаём его в модель, чтобы персона его «увидела».
     try:
         reply = await asyncio.to_thread(
-            get_reply, persona_key, history, facts, just_switched, image_payload
+            get_reply, persona_key, history, facts,
+            just_switched, image_payload, extra_system,
         )
     except Exception:
         logging.exception("Ошибка при запросе к Anthropic")
