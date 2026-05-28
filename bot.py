@@ -96,9 +96,8 @@ def adult_keyboard(lang="uk"):
 GATE_MESSAGES = {
     "uk": {
         "invite": (
-            "Здається, тобі хочеться когось по-справжньому близького, свого 💛 "
-            "У мене є та, що буде поруч - тепла і ніжна. Це доросла історія, "
-            "тож скажи: тобі вже виповнилося 18?"
+            "Слухай... у мене є одна крута дівчина, можу вас познайомити 😏 "
+            "Тільки це доросла історія, тож скажи: тобі вже виповнилося 18?"
         ),
         "no_reply": "Добре, без поспіху 🙂 Я поруч у будь-якому разі.",
         "newlook_not_mira": "Це про неї 🙂 Її образ можна змінити, коли поруч саме вона.",
@@ -110,9 +109,8 @@ GATE_MESSAGES = {
     },
     "ru": {
         "invite": (
-            "Кажется, тебе хочется кого-то по-настоящему близкого, своего 💛 "
-            "У меня есть та, что будет рядом - тёплая и нежная. Это взрослая "
-            "история, так что скажи: тебе уже исполнилось 18?"
+            "Слушай... у меня есть одна крутая девчонка, могу вас познакомить 😏 "
+            "Только это взрослая история, так что скажи: тебе уже исполнилось 18?"
         ),
         "no_reply": "Хорошо, без спешки 🙂 Я рядом в любом случае.",
         "newlook_not_mira": "Это про неё 🙂 Её образ можно изменить, когда рядом она.",
@@ -123,6 +121,13 @@ GATE_MESSAGES = {
         ),
     },
 }
+
+
+def _language_directive(lang):
+    """Жёсткая инструкция модели говорить на нужном языке (страховка от контекстного дрейфа)."""
+    if lang == "ru":
+        return "Отвечай на РУССКОМ языке (общайся по-русски, не сбивайся на украинский)."
+    return "Відповідай УКРАЇНСЬКОЮ мовою (не збивайся на російську)."
 
 
 def _build_mira_name_block(name_state):
@@ -196,9 +201,13 @@ async def send_persona_transition(message, user_id, persona_key):
                 "content": "(тебя только что выбрали - представься и продолжи разговор)",
             }
         ]
-    extra_system = None
+    # Жёстко фиксируем язык ответа: модель иногда «съезжает» на украинский,
+    # если последний assistant-ход (инвайт гейта) был на украинском.
+    lang = _detect_user_language(history)
+    parts = [_language_directive(lang)]
     if persona_key == "mira":
-        extra_system = _build_mira_name_block(database.get_mira_name_state(user_id))
+        parts.append(_build_mira_name_block(database.get_mira_name_state(user_id)))
+    extra_system = "\n\n".join(parts)
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     try:
         reply = await asyncio.to_thread(
@@ -727,9 +736,9 @@ async def handle_message(message: Message):
     ):
         return
 
-    # 4.7) Имя Миры: если она ещё не открылась, классифицируем ответ человека
-    #      на её предложение придумать ей имя (только после её первой реплики).
-    extra_system = None
+    # 4.7) Жёсткая директива языка для ответа + (для Миры) имя как доп-инструкция.
+    lang = _detect_user_language(history)
+    extra_parts = [_language_directive(lang)]
     if persona_key == "mira":
         name_state = database.get_mira_name_state(user_id)
         mira_already_spoke = any(m["role"] == "assistant" for m in history[:-1])
@@ -753,7 +762,8 @@ async def handle_message(message: Message):
                 database.set_mira_name_revealed(user_id)
                 name_state = {"status": "revealed", "nickname": None}
                 logging.info("Mira name revealed (refused nickname) user_id=%s", user_id)
-        extra_system = _build_mira_name_block(name_state)
+        extra_parts.append(_build_mira_name_block(name_state))
+    extra_system = "\n\n".join(extra_parts)
 
     # 5) Получаем ответ от модели. Запрос к Anthropic обычный (не async),
     #    поэтому выносим его в отдельный поток, чтобы бот не «зависал».
