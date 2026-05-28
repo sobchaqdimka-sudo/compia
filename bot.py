@@ -186,6 +186,16 @@ async def send_persona_transition(message, user_id, persona_key):
     """
     history = database.get_history(user_id, HISTORY_LIMIT)
     facts = database.get_facts(user_id)
+    # Anthropic API требует, чтобы разговор заканчивался user-репликой. После
+    # клика по кнопке гейта последним в истории лежит наш системный инвайт
+    # (assistant) - подкладываем синтетический «скрытый» user-ход, иначе 400.
+    if history and history[-1]["role"] == "assistant":
+        history = history + [
+            {
+                "role": "user",
+                "content": "(тебя только что выбрали - представься и продолжи разговор)",
+            }
+        ]
     extra_system = None
     if persona_key == "mira":
         extra_system = _build_mira_name_block(database.get_mira_name_state(user_id))
@@ -422,16 +432,17 @@ MEDIA_MESSAGES = {
 def _detect_user_language(history):
     """Грубо угадать язык собеседника по его последним сообщениям ('ru' или 'uk').
 
-    По умолчанию — uk (дефолтный язык бота). Смотрим украинские/русские буквы.
+    Эвристика: если в последних 6 сообщениях пользователя есть украинские буквы
+    (ї/є/і/ґ) — это украинский. Иначе — русский (русские тексты часто состоят
+    только из «общих» кириллических букв и не содержат ы/э/ъ/ё). По умолчанию
+    русский, чтобы не отвечать украинским на русский диалог.
     """
     text = " ".join(
         m["content"] for m in history[-6:] if m["role"] == "user"
     ).lower()
     if any(c in text for c in "їєіґ"):
         return "uk"
-    if any(c in text for c in "ыэъё"):
-        return "ru"
-    return "uk"
+    return "ru"
 
 
 async def _keep_action(chat_id, action):
