@@ -53,14 +53,6 @@ CHECKIN_LABELS = {
     "often": "Часто",
 }
 
-# Вступительные сообщения при выборе персоны. Изначально на украинском
-# (дальше персона сама подстроится под язык собеседника).
-PERSONA_INTROS = {
-    "friend": "Ну що, давай знайомитись 🙂 Я Алекс. Розкажи, як ти взагалі, що нового?",
-    "coach": "Радий знайомству, я Ніка. З чим хочеш розібратися? Що зараз для тебе важливо?",
-    "mira": "Привіт 💛 Я Міра. Рада, що ти поруч. Давай знайомитись - як тебе звати, розкажи трохи про себе?",
-}
-
 # Простое логирование, чтобы видеть в консоли, что бот работает.
 logging.basicConfig(level=logging.INFO)
 
@@ -120,13 +112,23 @@ def checkin_keyboard():
     )
 
 
-async def send_persona_intro(message, user_id, persona_key):
-    """Отправить вступительное сообщение от выбранной персоны и сохранить его."""
-    intro = PERSONA_INTROS.get(persona_key)
-    if intro:
-        await message.answer(intro)
-        # Сохраняем как сообщение бота, чтобы персона помнила, что уже представилась.
-        database.add_message(user_id, "assistant", intro)
+async def send_persona_transition(message, user_id, persona_key):
+    """Отправить ПЕРВОЕ сообщение новой персоны с учётом уже сложившейся истории.
+
+    Вместо канонной фразы «давай знакомиться» — генерируем тёплую реакцию персоны
+    в её характере с учётом онбординга/прошлых сообщений. Если истории нет — будет
+    живое первое представление.
+    """
+    history = database.get_history(user_id, HISTORY_LIMIT)
+    facts = database.get_facts(user_id)
+    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
+    try:
+        reply = await asyncio.to_thread(get_reply, persona_key, history, facts, True)
+    except Exception:
+        logging.exception("Не удалось сгенерировать переход персоны %s", persona_key)
+        return
+    database.add_message(user_id, "assistant", reply)
+    await send_bubbles(message.chat.id, reply)
 
 
 # --- Команды ---
@@ -229,7 +231,7 @@ async def on_persona_chosen(callback: CallbackQuery):
     await callback.message.answer(
         f"Готово, тепер поруч {info['name']}. Змінити завжди можна через /persona."
     )
-    await send_persona_intro(callback.message, user_id, key)
+    await send_persona_transition(callback.message, user_id, key)
     await callback.answer()
 
 
@@ -243,7 +245,7 @@ async def on_adult_choice(callback: CallbackQuery):
         database.set_adult_confirmed(user_id)
         database.set_persona(user_id, "mira")
         await callback.message.answer("Дякую. Тепер поруч Міра 💛")
-        await send_persona_intro(callback.message, user_id, "mira")
+        await send_persona_transition(callback.message, user_id, "mira")
     else:
         await callback.message.answer("Добре, без поспіху 🙂 Я поруч у будь-якому разі.")
     await callback.answer()
@@ -315,8 +317,59 @@ TALKING_TRIGGERS = (
     "скажи голосом", "озвуч", "вголос", "скажи вслух", "голосове повідомлення",
 )
 
-# Короткие подписи к фото по запросу (чтобы не повторяться каждый раз).
-PHOTO_CAPTIONS = ["ось, тримай 💛", "це для тебе", "ну як тобі?", "спеціально для тебе 😊"]
+# Служебные сообщения для медиа на языке собеседника (по умолчанию украинский).
+MEDIA_MESSAGES = {
+    "uk": {
+        "ask_desc": "Хочеш мене побачити? 🙈 А якою ти мене уявляєш? Опиши, будь ласка, - аж до одягу.",
+        "base_wait": "Добре... дай мені хвилинку 💛",
+        "photo_wait": "Зараз зроблю для тебе 💛",
+        "video_wait": "Записую для тебе відео 🎥",
+        "base_caption": "Ось я 💛 Подобаюсь?",
+        "error": "Ой, не вийшло цього разу. Спробуймо трохи згодом?",
+        "captions": ["ось, тримай 💛", "це для тебе", "ну як тобі?", "спеціально для тебе 😊"],
+        "video_follows": ["ну як? 🙈", "ось, спеціально для тебе 💛", "зловив настрій?"],
+    },
+    "ru": {
+        "ask_desc": "Хочешь меня увидеть? 🙈 А какой ты меня представляешь? Опиши, пожалуйста, - вплоть до одежды.",
+        "base_wait": "Хорошо... дай мне минутку 💛",
+        "photo_wait": "Сейчас сделаю для тебя 💛",
+        "video_wait": "Записываю для тебя видео 🎥",
+        "base_caption": "Вот я 💛 Нравлюсь?",
+        "error": "Ой, не получилось в этот раз. Попробуем чуть позже?",
+        "captions": ["вот, держи 💛", "это для тебя", "ну как тебе?", "специально для тебя 😊"],
+        "video_follows": ["ну как? 🙈", "вот, специально для тебя 💛", "поймал настроение?"],
+    },
+}
+
+
+def _detect_user_language(history):
+    """Грубо угадать язык собеседника по его последним сообщениям ('ru' или 'uk').
+
+    По умолчанию — uk (дефолтный язык бота). Смотрим украинские/русские буквы.
+    """
+    text = " ".join(
+        m["content"] for m in history[-6:] if m["role"] == "user"
+    ).lower()
+    if any(c in text for c in "їєіґ"):
+        return "uk"
+    if any(c in text for c in "ыэъё"):
+        return "ru"
+    return "uk"
+
+
+async def _keep_action(chat_id, action):
+    """Держать индикатор «отправляет фото/видео» сверху, пока не отменим.
+
+    send_chat_action в Telegram «висит» ~5 секунд, на длинной генерации индикатор
+    пропадает. Освежаем его каждые 4 секунды, чтобы человек видел, что идёт работа,
+    и не подумал, что бот завис.
+    """
+    while True:
+        try:
+            await bot.send_chat_action(chat_id=chat_id, action=action)
+        except Exception:
+            logging.exception("Ошибка при отправке chat_action")
+        await asyncio.sleep(4)
 
 
 def _keyword_media_intent(text):
@@ -334,10 +387,13 @@ def _keyword_media_intent(text):
     return None
 
 
-async def _generate_and_send_talking(message, user_id, look, history, facts):
+async def _generate_and_send_talking(message, user_id, look, history, facts, lang):
     """Сделать говорящий кружок (голос + липсинк) и отправить как video note."""
-    await message.answer("Записую для тебе відео 🎥")
-    await bot.send_chat_action(chat_id=message.chat.id, action="record_video_note")
+    msgs = MEDIA_MESSAGES[lang]
+    await message.answer(msgs["video_wait"])
+    keep = asyncio.create_task(_keep_action(message.chat.id, "record_video_note"))
+    path = None
+    line = None
     try:
         line = await asyncio.to_thread(generate_spoken_line, facts, history)
         path = await asyncio.to_thread(
@@ -345,17 +401,22 @@ async def _generate_and_send_talking(message, user_id, look, history, facts):
         )
     except Exception:
         logging.exception("Не удалось создать говорящий кружок user_id=%s", user_id)
-        await message.answer("Ой, відео не вийшло цього разу. Спробуймо трохи згодом?")
+        await message.answer(msgs["error"])
+    finally:
+        keep.cancel()
+    if path is None or line is None:
         return
     # В историю кладём то, что она «сказала» голосом - для непрерывности диалога.
     database.add_message(user_id, "assistant", line)
     await message.answer_video_note(FSInputFile(path))
 
 
-async def _generate_and_send_circle(message, user_id, look, request_text):
+async def _generate_and_send_circle(message, user_id, look, request_text, lang):
     """Сделать тихий видео-кружок из базового фото и отправить как video note."""
-    await message.answer("Записую для тебе відео 🎥")
-    await bot.send_chat_action(chat_id=message.chat.id, action="record_video_note")
+    msgs = MEDIA_MESSAGES[lang]
+    await message.answer(msgs["video_wait"])
+    keep = asyncio.create_task(_keep_action(message.chat.id, "record_video_note"))
+    path = None
     try:
         motion = await asyncio.to_thread(build_video_motion, look["desc"], request_text)
         path = await asyncio.to_thread(
@@ -363,38 +424,46 @@ async def _generate_and_send_circle(message, user_id, look, request_text):
         )
     except Exception:
         logging.exception("Не удалось создать видео-кружок user_id=%s", user_id)
-        await message.answer("Ой, відео не вийшло цього разу. Спробуймо трохи згодом?")
+        await message.answer(msgs["error"])
+    finally:
+        keep.cancel()
+    if path is None:
         return
-    follow = random.choice(["ну як? 🙈", "ось, спеціально для тебе 💛", "зловив настрій?"])
+    follow = random.choice(msgs["video_follows"])
     database.add_message(user_id, "assistant", follow)
     await message.answer_video_note(FSInputFile(path))
     await message.answer(follow)
 
 
-async def _generate_and_send_base(message, user_id, description):
+async def _generate_and_send_base(message, user_id, description, lang):
     """Создать канонический портрет Миры по описанию и отправить его."""
-    await message.answer("Добре... дай мені хвилинку 💛")
-    await bot.send_chat_action(chat_id=message.chat.id, action="upload_photo")
+    msgs = MEDIA_MESSAGES[lang]
+    await message.answer(msgs["base_wait"])
+    keep = asyncio.create_task(_keep_action(message.chat.id, "upload_photo"))
+    path = None
     try:
         prompt = await asyncio.to_thread(build_image_prompt, description, "")
         path = await asyncio.to_thread(imagegen.generate_base_portrait, prompt, user_id)
     except Exception:
         logging.exception("Не удалось создать базовый портрет user_id=%s", user_id)
-        await message.answer("Ой, не вийшло цього разу. Спробуймо трохи згодом?")
+        await message.answer(msgs["error"])
+    finally:
+        keep.cancel()
+    if path is None:
         return
     database.save_mira_look(user_id, description, path)
     database.increment_photos(user_id)
-    caption = "Ось я 💛 Подобаюсь?"
-    # В историю кладём ровно текст подписи (а не служебный маркер), чтобы модель
-    # потом НЕ имитировала «отправку фото» в обычных текстовых ответах.
+    caption = msgs["base_caption"]
     database.add_message(user_id, "assistant", caption)
     await message.answer_photo(FSInputFile(path), caption=caption)
 
 
-async def _generate_and_send_photo(message, user_id, look, request_text):
+async def _generate_and_send_photo(message, user_id, look, request_text, lang):
     """Создать фото Миры по запросу, сохраняя то же лицо (по референсу)."""
-    await message.answer("Зараз зроблю для тебе 💛")
-    await bot.send_chat_action(chat_id=message.chat.id, action="upload_photo")
+    msgs = MEDIA_MESSAGES[lang]
+    await message.answer(msgs["photo_wait"])
+    keep = asyncio.create_task(_keep_action(message.chat.id, "upload_photo"))
+    path = None
     try:
         instruction = await asyncio.to_thread(
             build_edit_instruction, look["desc"], request_text
@@ -404,10 +473,13 @@ async def _generate_and_send_photo(message, user_id, look, request_text):
         )
     except Exception:
         logging.exception("Не удалось создать фото user_id=%s", user_id)
-        await message.answer("Ой, не вийшло цього разу. Спробуймо трохи згодом?")
+        await message.answer(msgs["error"])
+    finally:
+        keep.cancel()
+    if path is None:
         return
     database.increment_photos(user_id)
-    caption = random.choice(PHOTO_CAPTIONS)
+    caption = random.choice(msgs["captions"])
     database.add_message(user_id, "assistant", caption)
     await message.answer_photo(FSInputFile(path), caption=caption)
 
@@ -425,6 +497,7 @@ async def try_handle_mira_media(message, user_id, history, facts):
 
     text = message.text
     look = database.get_mira_look(user_id)
+    lang = _detect_user_language(history)
 
     # 1) Ждём описание внешности - текущее сообщение и есть описание.
     if look["status"] == "awaiting_description":
@@ -432,7 +505,7 @@ async def try_handle_mira_media(message, user_id, history, facts):
         if not ok:
             database.set_mira_look_status(user_id, "none")
             return False
-        await _generate_and_send_base(message, user_id, text)
+        await _generate_and_send_base(message, user_id, text, lang)
         return True
 
     # 2) Намерение: быстрый путь по словам, иначе - по смыслу через модель
@@ -450,20 +523,17 @@ async def try_handle_mira_media(message, user_id, history, facts):
     # 3) Нужна готовая внешность (базовое фото как опора).
     if look["status"] != "ready":
         database.set_mira_look_status(user_id, "awaiting_description")
-        ask = (
-            "Хочеш мене побачити? 🙈 А якою ти мене уявляєш? "
-            "Опиши, будь ласка, - аж до одягу."
-        )
+        ask = MEDIA_MESSAGES[lang]["ask_desc"]
         database.add_message(user_id, "assistant", ask)
         await message.answer(ask)
         return True
 
     if intent == "photo":
-        await _generate_and_send_photo(message, user_id, look, text)
+        await _generate_and_send_photo(message, user_id, look, text, lang)
     elif intent == "talking":
-        await _generate_and_send_talking(message, user_id, look, history, facts)
+        await _generate_and_send_talking(message, user_id, look, history, facts, lang)
     else:  # video
-        await _generate_and_send_circle(message, user_id, look, text)
+        await _generate_and_send_circle(message, user_id, look, text, lang)
     return True
 
 
