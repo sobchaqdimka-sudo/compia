@@ -27,11 +27,11 @@ import videogen
 from ai import (
     build_edit_instruction,
     build_image_prompt,
-    build_spoken_line,
     build_video_motion,
+    detect_media_request,
     detect_need,
-    detect_photo_request,
     generate_checkin,
+    generate_spoken_line,
     get_reply,
     screen_appearance_description,
     update_memory,
@@ -297,54 +297,49 @@ async def send_bubbles(chat_id, text):
         await bot.send_message(chat_id, bubble)
 
 
-# Слова-маркеры просьбы «пришли фото» (укр/рус/англ). Сравниваем по подстроке
-# в нижнем регистре — отсюда стемы вроде "фотк" ловят и "фотку", и "фоткой".
+# --- Медиа Миры: фото и видео-кружочки ---
+
+# Слова-маркеры (быстрый путь без запроса к модели). Сравниваем по подстроке.
 PHOTO_TRIGGERS = (
     "фото", "фотк", "сфотк", "сфота", "селфі", "селфи", "selfie",
     "покажись", "покажи себе", "покажи себя", "пришли картин", "пришли свою",
-    "як ти виглядаєш", "как ты выглядишь", "хочу тебе побачити",
-    "хочу тебя увидеть", "хочу побачити тебе", "твоє фото", "твое фото",
-    "your photo", "send a pic", "show yourself",
+    "твоє фото", "твое фото", "your photo", "send a pic", "show yourself",
 )
-
-
-def looks_like_photo_request(text):
-    """Похоже ли сообщение на просьбу прислать фото."""
-    low = (text or "").lower()
-    return any(trigger in low for trigger in PHOTO_TRIGGERS)
-
-
-# Слова-маркеры просьбы о видео/кружочке.
 VIDEO_TRIGGERS = (
-    "відео", "видео", "кружоч", "кружок", "кружеч", "відос", "видос", "video",
-    "запиши мені", "зніми відео", "видосик",
+    "відео", "видео", "кружоч", "кружок", "кружеч", "відос", "видос",
+    "видосик", "video",
+)
+# Только ЯВНЫЕ просьбы услышать голос (без грубого «голос», чтобы не ловить
+# комплименты вроде «красивый голос у тебя»).
+TALKING_TRIGGERS = (
+    "скажи голосом", "озвуч", "вголос", "скажи вслух", "голосове повідомлення",
 )
 
-# Маркеры просьбы услышать голос → говорящий кружок (TTS + липсинк).
-VOICE_TRIGGERS = (
-    "голос", "озвуч", "вголос", "вслух", "проговори", "скажи мені вголос",
-    "почути тебе", "почути твій", "услышать тебя", "услышать твой", "скажи голосом",
-)
+# Короткие подписи к фото по запросу (чтобы не повторяться каждый раз).
+PHOTO_CAPTIONS = ["ось, тримай 💛", "це для тебе", "ну як тобі?", "спеціально для тебе 😊"]
 
 
-def looks_like_video_request(text):
-    """Похоже ли сообщение на просьбу записать видео-кружочек."""
+def _keyword_media_intent(text):
+    """Быстрое определение по словам: 'talking' / 'video' / 'photo' или None.
+
+    None — «по словам непонятно», тогда решает модель-классификатор.
+    """
     low = (text or "").lower()
-    return any(trigger in low for trigger in VIDEO_TRIGGERS)
+    if any(t in low for t in TALKING_TRIGGERS):
+        return "talking"
+    if any(t in low for t in VIDEO_TRIGGERS):
+        return "video"
+    if any(t in low for t in PHOTO_TRIGGERS):
+        return "photo"
+    return None
 
 
-def looks_like_voice_request(text):
-    """Похоже ли, что человек хочет услышать голос (говорящий кружок)."""
-    low = (text or "").lower()
-    return any(trigger in low for trigger in VOICE_TRIGGERS)
-
-
-async def _generate_and_send_talking(message, user_id, look, request_text, history):
+async def _generate_and_send_talking(message, user_id, look, history, facts):
     """Сделать говорящий кружок (голос + липсинк) и отправить как video note."""
     await message.answer("Записую для тебе відео 🎥")
     await bot.send_chat_action(chat_id=message.chat.id, action="record_video_note")
     try:
-        line = await asyncio.to_thread(build_spoken_line, history, request_text)
+        line = await asyncio.to_thread(generate_spoken_line, facts, history)
         path = await asyncio.to_thread(
             videogen.generate_talking_circle, look["base_path"], line, user_id
         )
@@ -358,7 +353,7 @@ async def _generate_and_send_talking(message, user_id, look, request_text, histo
 
 
 async def _generate_and_send_circle(message, user_id, look, request_text):
-    """Сделать видео-кружок из базового фото и отправить как video note."""
+    """Сделать тихий видео-кружок из базового фото и отправить как video note."""
     await message.answer("Записую для тебе відео 🎥")
     await bot.send_chat_action(chat_id=message.chat.id, action="record_video_note")
     try:
@@ -374,42 +369,6 @@ async def _generate_and_send_circle(message, user_id, look, request_text):
     database.add_message(user_id, "assistant", follow)
     await message.answer_video_note(FSInputFile(path))
     await message.answer(follow)
-
-
-async def try_handle_mira_video(message, user_id, history):
-    """Видео-кружочки Миры. Возвращает True, если сообщение обработано здесь.
-
-    Просьба про голос («скажи голосом», «хочу почути тебе») → говорящий кружок
-    с озвучкой; обычное «відео/кружок» → тихий живой клип.
-    """
-    if not videogen.is_enabled():
-        return False
-    is_video = looks_like_video_request(message.text)
-    is_voice = looks_like_voice_request(message.text)
-    if not (is_video or is_voice):
-        return False
-
-    look = database.get_mira_look(user_id)
-    if look["status"] != "ready":
-        # Нет внешности - сперва попросим описать (тогда появится базовое фото).
-        database.set_mira_look_status(user_id, "awaiting_description")
-        ask = (
-            "Хочеш відеокружечок? 🙈 Спершу скажи, якою ти мене бачиш - "
-            "опиши, аж до одягу, і я буду саме такою."
-        )
-        database.add_message(user_id, "assistant", ask)
-        await message.answer(ask)
-        return True
-
-    if is_voice:
-        await _generate_and_send_talking(message, user_id, look, message.text, history)
-    else:
-        await _generate_and_send_circle(message, user_id, look, message.text)
-    return True
-
-
-# Короткие подписи к фото по запросу (чтобы не повторяться каждый раз).
-PHOTO_CAPTIONS = ["ось, тримай 💛", "це для тебе", "ну як тобі?", "спеціально для тебе 😊"]
 
 
 async def _generate_and_send_base(message, user_id, description):
@@ -453,50 +412,59 @@ async def _generate_and_send_photo(message, user_id, look, request_text):
     await message.answer_photo(FSInputFile(path), caption=caption)
 
 
-async def try_handle_mira_photo(message, user_id, history):
-    """Логика фото Миры. Возвращает True, если сообщение обработано здесь.
+async def try_handle_mira_media(message, user_id, history, facts):
+    """Единая обработка медиа Миры (фото / тихий кружок / говорящий кружок).
 
-    Сценарии:
+    Возвращает True, если сообщение обработано здесь.
     - ждём описание внешности → текущее сообщение и есть описание (с модерацией);
-    - просьба фото (по ключевым словам ИЛИ по смыслу), внешности нет → просим описать;
-    - просьба фото, внешность готова → генерируем фото по референсу.
+    - намерение определяем по ключевым словам, иначе - классификатором по смыслу;
+    - если внешности нет, а медиа просят → сперва просим описать.
     """
     if not imagegen.is_enabled():
         return False
 
-    look = database.get_mira_look(user_id)
-    status = look["status"]
     text = message.text
+    look = database.get_mira_look(user_id)
 
-    if status == "awaiting_description":
+    # 1) Ждём описание внешности - текущее сообщение и есть описание.
+    if look["status"] == "awaiting_description":
         ok, _reason = await asyncio.to_thread(screen_appearance_description, text)
         if not ok:
-            # Недопустимое содержание - выходим из ожидания, без нотаций.
             database.set_mira_look_status(user_id, "none")
             return False
         await _generate_and_send_base(message, user_id, text)
         return True
 
-    # Просьба о фото: сперва быстрые ключевые слова, иначе - по смыслу через модель
-    # (ловит продолжения вроде «стань боком», «отойди далі», «переодягнись»).
-    is_photo = looks_like_photo_request(text)
-    if not is_photo:
-        is_photo = await asyncio.to_thread(detect_photo_request, history, text)
+    # 2) Намерение: быстрый путь по словам, иначе - по смыслу через модель
+    #    (ловит продолжения «стань боком», «хочу почути тебе» и т.п.).
+    intent = _keyword_media_intent(text)
+    if intent is None:
+        intent = await asyncio.to_thread(detect_media_request, history, text)
+    if intent == "none":
+        return False
 
-    if is_photo:
-        if status != "ready":
-            database.set_mira_look_status(user_id, "awaiting_description")
-            ask = (
-                "Хочеш мене побачити? 🙈 А якою ти мене уявляєш? "
-                "Опиши, будь ласка, - аж до одягу."
-            )
-            database.add_message(user_id, "assistant", ask)
-            await message.answer(ask)
-            return True
-        await _generate_and_send_photo(message, user_id, look, text)
+    # Видео/голос требуют включённого видео-модуля; иначе пусть отвечает текстом.
+    if intent in ("video", "talking") and not videogen.is_enabled():
+        return False
+
+    # 3) Нужна готовая внешность (базовое фото как опора).
+    if look["status"] != "ready":
+        database.set_mira_look_status(user_id, "awaiting_description")
+        ask = (
+            "Хочеш мене побачити? 🙈 А якою ти мене уявляєш? "
+            "Опиши, будь ласка, - аж до одягу."
+        )
+        database.add_message(user_id, "assistant", ask)
+        await message.answer(ask)
         return True
 
-    return False
+    if intent == "photo":
+        await _generate_and_send_photo(message, user_id, look, text)
+    elif intent == "talking":
+        await _generate_and_send_talking(message, user_id, look, history, facts)
+    else:  # video
+        await _generate_and_send_circle(message, user_id, look, text)
+    return True
 
 
 # --- Обычные сообщения ---
@@ -561,13 +529,12 @@ async def handle_message(message: Message):
             just_switched = True
             logging.info("Онбординг: user_id=%s -> %s", user_id, need)
 
-    # 4.5) Медиа Миры: видео-кружок или фото. Видео проверяем первым (у него свои
-    #      слова-маркеры). Если сообщение обработано здесь — выходим.
-    if persona_key == "mira":
-        if await try_handle_mira_video(message, user_id, history):
-            return
-        if await try_handle_mira_photo(message, user_id, history):
-            return
+    # 4.5) Медиа Миры (фото / тихий кружок / говорящий кружок). Единый диспетчер.
+    #      Если сообщение обработано здесь — выходим.
+    if persona_key == "mira" and await try_handle_mira_media(
+        message, user_id, history, facts
+    ):
+        return
 
     # 5) Получаем ответ от модели. Запрос к Anthropic обычный (не async),
     #    поэтому выносим его в отдельный поток, чтобы бот не «зависал».
