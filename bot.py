@@ -427,7 +427,9 @@ async def on_persona_chosen(callback: CallbackQuery):
         return
 
     # Персона 18+ (Мира): сначала спрашиваем возраст, если ещё не подтверждён.
+    # Ручной выбор Миры = явная попытка - сбрасываем предыдущий отказ.
     if info["requires_adult"] and not database.is_adult_confirmed(user_id):
+        database.clear_adult_declined(user_id)
         history = database.get_history(user_id, HISTORY_LIMIT)
         lang = _detect_user_language(history)
         ask = (
@@ -459,12 +461,16 @@ async def on_adult_choice(callback: CallbackQuery):
 
     if choice == "yes":
         database.set_adult_confirmed(user_id)
+        database.clear_adult_declined(user_id)
         database.set_persona(user_id, "mira")
         database.set_mira_activated_if_unset(user_id)
         # Без «Дякую. Тепер поруч Міра» — даём ей самой написать первой
         # (так появление не выглядит как системное уведомление).
         await send_persona_transition(callback.message, user_id, "mira")
     else:
+        # Фиксируем отказ - больше не дёргаем гейт автоматически (только если
+        # пользователь сам выберет Миру через /persona).
+        database.set_adult_declined(user_id)
         await callback.message.answer(GATE_MESSAGES[lang]["no_reply"])
     await callback.answer()
 
@@ -856,6 +862,14 @@ async def handle_message(message: Message):
                 persona_key = "mira"
                 just_switched = True
                 logging.info("Онбординг: user_id=%s -> mira", user_id)
+            elif database.is_adult_declined(user_id):
+                # Уже отказался от гейта раньше - не дёргаем заново. Просто
+                # переключаем на друга, если ещё не там, и идём обычным ответом.
+                if persona_key == "onboarding":
+                    database.set_persona(user_id, "friend")
+                    persona_key = "friend"
+                    just_switched = True
+                logging.info("Онбординг: user_id=%s romantic, но уже отказался от гейта", user_id)
             else:
                 # Гейт пошлём СРАЗУ после финальной реплики хоста (см. ниже),
                 # чтобы не было паузы «подожди минутку, а ничего не происходит».
@@ -871,13 +885,14 @@ async def handle_message(message: Message):
 
     # 4.2) Также для friend/coach: если в разговоре явная тяга к близости -
     #      смысловой детектор (а не ключевые слова) сам подведёт человека к гейту
-    #      Миры. Чтобы не дёргать модель на каждое сообщение, запускаем не раньше
-    #      чем после 4 сообщений в этой роли с момента входа.
+    #      Миры. Запускаем не раньше 4 сообщений в этой роли и НЕ показываем
+    #      гейт повторно, если человек уже отказался ранее.
     if (
         image_payload is None
         and not just_switched
         and persona_key in ("friend", "coach")
         and user_msg_count >= 4
+        and not database.is_adult_declined(user_id)
     ):
         try:
             need_now = await asyncio.to_thread(detect_need, history)

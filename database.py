@@ -77,6 +77,9 @@ def init_db():
         # Момент первой активации Миры для этого пользователя — точка отсчёта
         # «стадий отношений» (день 0 = только знакомство; чем дальше — глубже).
         "mira_activated_at": "TEXT",
+        # Когда (и был ли) пользователь явно отказался от гейта 18+. Если стоит -
+        # больше не предлагаем автоматически (только через ручной /persona).
+        "adult_declined_at": "TEXT",
     }
     for name, decl in mira_columns.items():
         if name not in existing:
@@ -314,6 +317,41 @@ def set_mira_name_revealed(user_id):
     _ensure_user(conn, user_id)
     conn.execute(
         "UPDATE users SET mira_name_status = 'revealed' WHERE user_id = ?", (user_id,)
+    )
+    conn.commit()
+    conn.close()
+
+
+def is_adult_declined(user_id):
+    """Был ли явный отказ от гейта 18+ (чтобы не дёргать его автоматически снова)."""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    row = conn.execute(
+        "SELECT adult_declined_at FROM users WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    conn.commit()
+    conn.close()
+    return bool(row and row[0])
+
+
+def set_adult_declined(user_id):
+    """Отметить отказ от гейта 18+. Автоматический гейт больше не показываем."""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    conn.execute(
+        "UPDATE users SET adult_declined_at = datetime('now') WHERE user_id = ?",
+        (user_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def clear_adult_declined(user_id):
+    """Сбросить отметку отказа (когда пользователь ВРУЧНУЮ запрашивает Миру)."""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    conn.execute(
+        "UPDATE users SET adult_declined_at = NULL WHERE user_id = ?", (user_id,)
     )
     conn.commit()
     conn.close()
