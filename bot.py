@@ -773,6 +773,7 @@ async def handle_message(message: Message):
     #    переключаем персону. Романтику (Миру) тут не выбираем никогда.
     #    Для входящих фото детекцию пропускаем — фото мало говорит о потребности.
     just_switched = False
+    gate_after_reply = False  # для романтики+не_взрослый: гейт прилетит сразу после реплики хоста
     if image_payload is None and persona_key == "onboarding" and user_msg_count >= ONBOARDING_MIN_MESSAGES:
         try:
             need = await asyncio.to_thread(detect_need, history)
@@ -787,16 +788,12 @@ async def handle_message(message: Message):
                 just_switched = True
                 logging.info("Онбординг: user_id=%s -> mira", user_id)
             else:
-                # Человек тянется к близости. Предлагаем гейт 18+; имя пока не
-                # называем (Мира представится сама). Другом ставим как мягкий
-                # дефолт, чтобы он не застрял в онбординге.
-                database.set_persona(user_id, "friend")
-                lang = _detect_user_language(history)
-                invite = GATE_MESSAGES[lang]["invite"]
-                database.add_message(user_id, "assistant", invite)
-                await message.answer(invite, reply_markup=adult_keyboard(lang))
-                logging.info("Онбординг: user_id=%s -> предложен 18+ гейт", user_id)
-                return
+                # Гейт пошлём СРАЗУ после финальной реплики хоста (см. ниже),
+                # чтобы не было паузы «подожди минутку, а ничего не происходит».
+                # Персону пока оставляем onboarding — закрывающая реплика идёт
+                # от хоста, а не от друга.
+                gate_after_reply = True
+                logging.info("Онбординг: user_id=%s -> гейт сразу после реплики", user_id)
         elif need in ("friend", "coach"):
             database.set_persona(user_id, need)
             persona_key = need
@@ -813,6 +810,18 @@ async def handle_message(message: Message):
     # 4.7) Жёсткая директива языка для ответа + (для Миры) имя как доп-инструкция.
     lang = _detect_user_language(history)
     extra_parts = [_language_directive(lang)]
+    if gate_after_reply:
+        # Прямо сейчас это последняя реплика хоста перед системным гейтом.
+        # Дать ОДНУ тёплую финальную фразу, без вопросов и без «подожди».
+        extra_parts.append(
+            "СЕЙЧАС это твоя ПОСЛЕДНЯЯ реплика в роли хоста. Сразу после неё "
+            "человек увидит предложение познакомиться с близкой девушкой (с "
+            "кнопкой 18+) - оно прилетит автоматически от системы. Дай ОДНУ "
+            "короткую тёплую финальную фразу: что ты, кажется, начинаешь "
+            "понимать, чего ему сейчас по-настоящему не хватает. Без вопросов. "
+            "БЕЗ обещаний типа «подожди», «сейчас будет», «минутку», «погоди» - "
+            "всё произойдёт само."
+        )
     if persona_key == "mira":
         name_state = database.get_mira_name_state(user_id)
         mira_already_spoke = any(m["role"] == "assistant" for m in history[:-1])
@@ -855,6 +864,15 @@ async def handle_message(message: Message):
     # 6) Сохраняем ответ бота и отправляем его пользователю «живыми» репликами.
     database.add_message(user_id, "assistant", reply)
     await send_bubbles(message.chat.id, reply)
+
+    # 6.5) Если онбординг готов передать человека к Мире через гейт - шлём гейт
+    #      сразу после финальной реплики хоста (никакого ожидания «минутку»).
+    if gate_after_reply:
+        database.set_persona(user_id, "friend")  # мягкий дефолт на случай «Ще ні»
+        invite = GATE_MESSAGES[lang]["invite"]
+        database.add_message(user_id, "assistant", invite)
+        await message.answer(invite, reply_markup=adult_keyboard(lang))
+        return  # память обновлять не нужно — это конец онбординга
 
     # 7) Долговременная память: раз в MEMORY_UPDATE_EVERY сообщений пользователя
     #    обновляем «конспект». Делаем это ПОСЛЕ ответа, чтобы человек не ждал лишнего.
