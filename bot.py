@@ -8,12 +8,16 @@
 import asyncio
 import base64
 import logging
+import os
 import random
 import re
+import shutil
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
+    BotCommand,
+    BotCommandScopeAllPrivateChats,
     CallbackQuery,
     FSInputFile,
     InlineKeyboardButton,
@@ -41,6 +45,7 @@ from ai import (
 from config import (
     CHECKIN_POLL_MINUTES,
     HISTORY_LIMIT,
+    MEDIA_DIR,
     MEMORY_UPDATE_EVERY,
     ONBOARDING_MIN_MESSAGES,
     SUMMARY_HISTORY_LIMIT,
@@ -168,6 +173,47 @@ def start_keyboard():
     )
 
 
+def reset_keyboard(lang="uk"):
+    """Кнопки подтверждения полного сброса по повторному /start."""
+    labels = {
+        "uk": ("Так, почати заново", "Ні, лишаємось"),
+        "ru": ("Да, начать заново", "Нет, остаёмся"),
+    }.get(lang, ("Так, почати заново", "Ні, лишаємось"))
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=labels[0], callback_data="reset:yes")],
+            [InlineKeyboardButton(text=labels[1], callback_data="reset:no")],
+        ]
+    )
+
+
+# Тексты подтверждения сброса под язык собеседника.
+RESET_MESSAGES = {
+    "uk": {
+        "confirm": (
+            "Ти вже починав зі мною - впевнений, що хочеш все скинути? "
+            "Це зітре всю нашу історію."
+        ),
+        "no_reply": "Добре, лишаємось 🙂",
+    },
+    "ru": {
+        "confirm": (
+            "Ты уже начинал со мной - уверен, что хочешь всё сбросить? "
+            "Это сотрёт всю нашу историю."
+        ),
+        "no_reply": "Хорошо, остаёмся 🙂",
+    },
+}
+
+# Стартовое приветствие (всегда украинский — это первый контакт, истории ещё нет).
+START_WELCOME = (
+    "Привіт 🙂\n"
+    "Можемо так: одразу обереш, хто буде поруч - друг, коуч чи близька "
+    "дівчина. Або просто почнемо говорити, і я сам відчую, кого тобі зараз "
+    "хочеться."
+)
+
+
 def checkin_keyboard():
     """Кнопки выбора частоты проактивных сообщений."""
     return InlineKeyboardMarkup(
@@ -227,19 +273,25 @@ async def send_persona_transition(message, user_id, persona_key):
 
 @dp.message(CommandStart())
 async def handle_start(message: Message):
-    """Ответ на /start. Приветствие ВСЕГДА на украинском (требование продукта).
+    """Ответ на /start.
 
-    Даём две опции: выбрать персону сразу или просто пообщаться (мягкий онбординг).
+    Если человек тут впервые - тёплое приветствие на украинском (это первый
+    контакт, истории ещё нет, поэтому язык продуктовый по умолчанию).
+    Если он уже писал - предлагаем сброс с подтверждением, чтобы он не потерял
+    всю историю случайно.
     """
-    # Создаём запись о пользователе (для нового это персона onboarding).
-    database.get_persona(message.from_user.id)
-    await message.answer(
-        "Привіт 🙂\n"
-        "Можемо так: одразу обереш, хто буде поруч - друг, коуч чи близька "
-        "дівчина. Або просто почнемо говорити, і я сам відчую, кого тобі зараз "
-        "хочеться.",
-        reply_markup=start_keyboard(),
-    )
+    user_id = message.from_user.id
+    if database.count_user_messages(user_id) > 0:
+        history = database.get_history(user_id, HISTORY_LIMIT)
+        lang = _detect_user_language(history)
+        await message.answer(
+            RESET_MESSAGES[lang]["confirm"], reply_markup=reset_keyboard(lang)
+        )
+        return
+
+    # Первый /start - создаём запись и здороваемся.
+    database.get_persona(user_id)
+    await message.answer(START_WELCOME, reply_markup=start_keyboard())
 
 
 @dp.message(Command("persona"))
@@ -292,8 +344,8 @@ async def on_start_choice(callback: CallbackQuery):
         )
     else:  # chat — остаёмся в мягком онбординге
         await callback.message.answer(
-            "Добре. Розкажи перше, що зараз приходить - неважливо, велике чи дрібниця. "
-            "Я вже слухаю."
+            "Чудово 🙂 Просто почни з чогось - як настрій, що в голові, "
+            "якась дрібниця. Я нікуди не поспішаю."
         )
     await callback.answer()
 
@@ -346,6 +398,26 @@ async def on_adult_choice(callback: CallbackQuery):
         await send_persona_transition(callback.message, user_id, "mira")
     else:
         await callback.message.answer(GATE_MESSAGES[lang]["no_reply"])
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("reset:"))
+async def on_reset_choice(callback: CallbackQuery):
+    """Подтверждение полного сброса по повторному /start."""
+    choice = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
+
+    if choice == "yes":
+        # Полностью стираем все данные пользователя и его медиа.
+        database.wipe_user(user_id)
+        shutil.rmtree(os.path.join(MEDIA_DIR, str(user_id)), ignore_errors=True)
+        # Заново создаём «нового» юзера и здороваемся как в первый раз.
+        database.get_persona(user_id)
+        await callback.message.answer(START_WELCOME, reply_markup=start_keyboard())
+    else:
+        history = database.get_history(user_id, HISTORY_LIMIT)
+        lang = _detect_user_language(history)
+        await callback.message.answer(RESET_MESSAGES[lang]["no_reply"])
     await callback.answer()
 
 
@@ -827,9 +899,34 @@ async def checkin_loop():
             logging.exception("Ошибка в фоновой задаче проактивных сообщений")
 
 
+async def _register_slash_commands():
+    """Зарегистрировать в Telegram список команд с описаниями.
+
+    Когда юзер печатает «/», Telegram показывает их подсказкой - по языку его UI.
+    Без language_code это дефолт для всех остальных языков.
+    """
+    uk_cmds = [
+        BotCommand(command="start", description="Почати або скинути все"),
+        BotCommand(command="persona", description="Змінити, хто поруч"),
+        BotCommand(command="newlook", description="Змінити образ Міри"),
+        BotCommand(command="checkins", description="Як часто я пишу першою"),
+    ]
+    ru_cmds = [
+        BotCommand(command="start", description="Начать или сбросить всё"),
+        BotCommand(command="persona", description="Сменить, кто рядом"),
+        BotCommand(command="newlook", description="Сменить образ Миры"),
+        BotCommand(command="checkins", description="Как часто я пишу первой"),
+    ]
+    scope = BotCommandScopeAllPrivateChats()
+    await bot.set_my_commands(uk_cmds, scope=scope, language_code="uk")
+    await bot.set_my_commands(ru_cmds, scope=scope, language_code="ru")
+    await bot.set_my_commands(uk_cmds, scope=scope)
+
+
 async def main():
     """Точка входа: подготовить базу, запустить фоновую задачу и опрос Telegram."""
     database.init_db()
+    await _register_slash_commands()
 
     # Диагностика фото: какой Python запустил бота и виден ли ему fal_client.
     # Если тут WARNING — пакет стоит в ДРУГОМ интерпретаторе (типичная беда на Mac).

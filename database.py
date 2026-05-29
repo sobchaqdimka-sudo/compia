@@ -316,6 +316,20 @@ def set_mira_name_revealed(user_id):
     conn.close()
 
 
+def wipe_user(user_id):
+    """Полностью стереть данные конкретного пользователя (для сброса по /start).
+
+    Удаляем все его сообщения, долговременную память и строку из users (включая
+    внешность Миры, никнейм, счётчики). После этого человек снова «новый».
+    """
+    conn = _connect()
+    conn.execute("DELETE FROM messages WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM user_facts WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+
 def increment_photos(user_id):
     """Увеличить счётчик сгенерированных фото (для учёта расходов)."""
     conn = _connect()
