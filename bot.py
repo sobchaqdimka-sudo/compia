@@ -527,19 +527,20 @@ def split_into_bubbles(text, max_bubbles=4):
 async def send_bubbles(chat_id, text):
     """Отправить ответ несколькими сообщениями, как живой человек в мессенджере.
 
-    Число реплик слегка рандомим: иногда всё одним сообщением (когда мысль
-    цельная или это история подлиннее), иногда 2-3 коротких подряд. Так
-    переписка не выглядит каждый раз одинаково «ровно по два смс».
-    Между репликами короткая пауза и статус «печатает», чтобы ощущалось живо.
+    Число реплик слегка рандомим: иногда всё одним сообщением, иногда 2-3
+    коротких подряд. Перед КАЖДОЙ репликой - статус «печатает» и пауза,
+    пропорциональная длине реплики (0.7 до 2.7с), чтобы ощущалось живо
+    и индикатор «печатает» висел сверху между сообщениями.
     """
     max_bubbles = random.choices([1, 2, 3], weights=[25, 45, 30])[0]
     bubbles = split_into_bubbles(text, max_bubbles=max_bubbles)
     if not bubbles:
         bubbles = ["..."]
-    for i, bubble in enumerate(bubbles):
-        if i > 0:
-            await bot.send_chat_action(chat_id=chat_id, action="typing")
-            await asyncio.sleep(min(1.5, 0.4 + len(bubble) / 70))
+    for bubble in bubbles:
+        await bot.send_chat_action(chat_id=chat_id, action="typing")
+        # Длительность «печатания»: ~22мс на символ, в пределах 0.7–2.7с.
+        delay = 0.7 + min(2.0, len(bubble) * 0.022)
+        await asyncio.sleep(delay)
         await bot.send_message(chat_id, bubble)
 
 
