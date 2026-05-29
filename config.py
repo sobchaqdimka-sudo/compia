@@ -94,6 +94,15 @@ BASE_PORTRAIT_SCENE = (
     "relaxed everyday look, gentle natural expression, looking at the camera"
 )
 
+# Дефолтный образ Миры для первого появления (cinematic момент до /newlook).
+# Описание словами — пройдёт через build_image_prompt и станет английским
+# фото-промптом. Получившийся портрет кешируется в media/_defaults/.
+DEFAULT_MIRA_DESC = (
+    "светло-русые мягкие волосы до плеч, тёплые карие глаза, мягкая искренняя "
+    "улыбка, в уютном кремовом светере, сидит дома у окна в естественном свете, "
+    "розслаблена домашня поза, без макияжа"
+)
+
 # --- Видео-кружочки (image-to-video) ---
 # Модель оживления фото в короткое видео.
 VIDEO_MODEL = "fal-ai/kling-video/v2.1/standard/image-to-video"
