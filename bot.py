@@ -869,6 +869,34 @@ async def handle_message(message: Message):
             just_switched = True
             logging.info("Онбординг: user_id=%s -> %s", user_id, need)
 
+    # 4.2) Также для friend/coach: если в разговоре явная тяга к близости -
+    #      смысловой детектор (а не ключевые слова) сам подведёт человека к гейту
+    #      Миры. Чтобы не дёргать модель на каждое сообщение, запускаем не раньше
+    #      чем после 4 сообщений в этой роли с момента входа.
+    if (
+        image_payload is None
+        and not just_switched
+        and persona_key in ("friend", "coach")
+        and user_msg_count >= 4
+    ):
+        try:
+            need_now = await asyncio.to_thread(detect_need, history)
+        except Exception:
+            logging.exception("Не удалось определить потребность в friend/coach")
+            need_now = "unclear"
+        if need_now == "romantic":
+            if database.is_adult_confirmed(user_id):
+                # Возраст подтверждён - сразу переключаем на Миру.
+                database.set_persona(user_id, "mira")
+                database.set_mira_activated_if_unset(user_id)
+                persona_key = "mira"
+                just_switched = True
+                logging.info("Friend/Coach -> mira: user_id=%s adult", user_id)
+            else:
+                # Гейт пошлём после финальной реплики текущей персоны.
+                gate_after_reply = True
+                logging.info("Friend/Coach -> гейт после реплики: user_id=%s", user_id)
+
     # 4.5) Медиа Миры (фото / тихий кружок / говорящий кружок). Единый диспетчер.
     #      Для входящих фото пропускаем (это контент К ней, а не просьба ОТ неё).
     if image_payload is None and persona_key == "mira" and await try_handle_mira_media(
