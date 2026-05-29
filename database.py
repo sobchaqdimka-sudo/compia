@@ -74,6 +74,9 @@ def init_db():
         # 'revealed' (отказался дать своё, она назвалась Мирой).
         "mira_name_status": "TEXT NOT NULL DEFAULT 'unrevealed'",
         "mira_nickname": "TEXT",  # имя, которое дал пользователь (если дал)
+        # Момент первой активации Миры для этого пользователя — точка отсчёта
+        # «стадий отношений» (день 0 = только знакомство; чем дальше — глубже).
+        "mira_activated_at": "TEXT",
     }
     for name, decl in mira_columns.items():
         if name not in existing:
@@ -314,6 +317,35 @@ def set_mira_name_revealed(user_id):
     )
     conn.commit()
     conn.close()
+
+
+def set_mira_activated_if_unset(user_id):
+    """Поставить отметку «Мира впервые активирована» — только если её ещё нет.
+
+    Идемпотентно: повторные вызовы не сбрасывают дату. Используется как точка
+    отсчёта стадий отношений (дни вместе с Мирой).
+    """
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    conn.execute(
+        "UPDATE users SET mira_activated_at = datetime('now') "
+        "WHERE user_id = ? AND mira_activated_at IS NULL",
+        (user_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_mira_activated_at(user_id):
+    """Вернуть момент активации Миры (строка SQLite-времени) или None."""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    row = conn.execute(
+        "SELECT mira_activated_at FROM users WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    conn.commit()
+    conn.close()
+    return row[0] if row else None
 
 
 def wipe_user(user_id):
