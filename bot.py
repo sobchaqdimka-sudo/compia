@@ -44,7 +44,6 @@ from ai import (
 )
 from config import (
     CHECKIN_POLL_MINUTES,
-    DEFAULT_MIRA_DESC,
     HISTORY_LIMIT,
     MEDIA_DIR,
     MEMORY_UPDATE_EVERY,
@@ -231,31 +230,6 @@ def checkin_keyboard():
     )
 
 
-async def _maybe_send_default_mira_photo(message, user_id, lang):
-    """Если у пользователя ещё нет образа Миры - выставить дефолтный и прислать
-    фото после её первой реплики. Это «cinematic» момент появления.
-    """
-    look = database.get_mira_look(user_id)
-    if look["status"] != "ready":
-        default_path = imagegen.default_portrait_path()
-        if not os.path.exists(default_path):
-            return  # дефолт ещё не сгенерён (нет ключа или ошибка) - просто пропускаем
-        database.save_mira_look(user_id, "(дефолтный образ)", default_path)
-        look = database.get_mira_look(user_id)
-
-    if not (look["status"] == "ready" and look["base_path"]
-            and os.path.exists(look["base_path"])):
-        return
-
-    caption = "ось, як я виглядаю 🙂" if lang == "uk" else "вот, как я выгляжу 🙂"
-    try:
-        await message.answer_photo(FSInputFile(look["base_path"]), caption=caption)
-        database.add_message(user_id, "assistant", caption)
-        database.increment_photos(user_id)
-    except Exception:
-        logging.exception("Не удалось отправить дефолтное фото Миры user_id=%s", user_id)
-
-
 async def send_persona_transition(message, user_id, persona_key):
     """Отправить ПЕРВОЕ сообщение новой персоны с учётом уже сложившейся истории.
 
@@ -405,11 +379,6 @@ async def on_persona_chosen(callback: CallbackQuery):
         f"Готово, тепер поруч {info['name']}. Змінити завжди можна через /persona."
     )
     await send_persona_transition(callback.message, user_id, key)
-    # Для Миры — cinematic дефолтное фото, если она появляется впервые.
-    if key == "mira":
-        history = database.get_history(user_id, HISTORY_LIMIT)
-        lang = _detect_user_language(history)
-        await _maybe_send_default_mira_photo(callback.message, user_id, lang)
     await callback.answer()
 
 
@@ -427,9 +396,6 @@ async def on_adult_choice(callback: CallbackQuery):
         # Без «Дякую. Тепер поруч Міра» — даём ей самой написать первой
         # (так появление не выглядит как системное уведомление).
         await send_persona_transition(callback.message, user_id, "mira")
-        # И сразу следом — её фото для cinematic эффекта (дефолтный образ
-        # до /newlook).
-        await _maybe_send_default_mira_photo(callback.message, user_id, lang)
     else:
         await callback.message.answer(GATE_MESSAGES[lang]["no_reply"])
     await callback.answer()
@@ -975,29 +941,10 @@ async def _register_slash_commands():
     await bot.set_my_commands(uk_cmds, scope=scope)
 
 
-async def _prepare_default_mira_portrait():
-    """Один раз сгенерировать дефолтный портрет Миры для cinematic появления.
-
-    Если файл уже есть на диске - выходим сразу (не тратим Haiku-вызов и fal).
-    """
-    if not imagegen.is_enabled():
-        return
-    default_path = imagegen.default_portrait_path()
-    if os.path.exists(default_path):
-        logging.info("Дефолтный портрет Миры уже есть: %s", default_path)
-        return
-    try:
-        prompt = await asyncio.to_thread(build_image_prompt, DEFAULT_MIRA_DESC, "")
-        await asyncio.to_thread(imagegen.ensure_default_portrait, prompt)
-    except Exception:
-        logging.exception("Не удалось подготовить дефолтный портрет Миры")
-
-
 async def main():
     """Точка входа: подготовить базу, запустить фоновую задачу и опрос Telegram."""
     database.init_db()
     await _register_slash_commands()
-    await _prepare_default_mira_portrait()
 
     # Диагностика фото: какой Python запустил бота и виден ли ему fal_client.
     # Если тут WARNING — пакет стоит в ДРУГОМ интерпретаторе (типичная беда на Mac).

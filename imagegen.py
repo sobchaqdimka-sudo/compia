@@ -54,40 +54,6 @@ def _first_image_url(result):
     return images[0]["url"]
 
 
-def ensure_default_portrait(prompt):
-    """Подготовить дефолтный портрет Миры для первого появления у новых юзеров.
-
-    Кешируем в media/_defaults/mira_default.png — генерируем один раз, дальше
-    отдаём один и тот же файл всем новым пользователям (до их /newlook).
-    Возвращает путь к файлу. Если FAL_KEY не задан, вернёт None.
-    """
-    if not is_enabled():
-        return None
-    defaults_dir = os.path.join(MEDIA_DIR, "_defaults")
-    os.makedirs(defaults_dir, exist_ok=True)
-    path = os.path.join(defaults_dir, "mira_default.png")
-    if os.path.exists(path):
-        return path
-    fal_client = _client()
-    result = fal_client.subscribe(
-        IMAGE_MODEL_BASE,
-        arguments={
-            "prompt": prompt,
-            "image_size": "portrait_4_3",
-            "num_images": 1,
-            "enable_safety_checker": True,
-        },
-    )
-    _download(_first_image_url(result), path)
-    logging.info("Сгенерирован дефолтный портрет Миры: %s", path)
-    return path
-
-
-def default_portrait_path():
-    """Путь к закешированному дефолтному портрету Миры (может ещё не существовать)."""
-    return os.path.join(MEDIA_DIR, "_defaults", "mira_default.png")
-
-
 def generate_base_portrait(prompt, user_id):
     """Сгенерировать канонический портрет и сохранить как base.png. Вернуть путь."""
     fal_client = _client()
