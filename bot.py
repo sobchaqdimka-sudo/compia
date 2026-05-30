@@ -302,11 +302,13 @@ async def send_persona_transition(message, user_id, persona_key):
     """
     history = database.get_history(user_id, HISTORY_LIMIT)
     facts = database.get_facts(user_id)
-    # Anthropic API требует, чтобы разговор заканчивался user-репликой. После
-    # клика по кнопке гейта последним в истории лежит наш системный инвайт
-    # (assistant) - подкладываем синтетический «скрытый» user-ход, иначе 400.
-    if history and history[-1]["role"] == "assistant":
-        history = history + [
+    # Anthropic API требует, чтобы разговор заканчивался user-репликой и
+    # вообще содержал хотя бы одно сообщение. Пустая история (юзер выбрал
+    # персону кнопкой не написав ни строки) и история, заканчивающаяся
+    # на assistant (после системного инвайта гейта) - оба случая ломают
+    # запрос. Подкладываем синтетический «скрытый» user-ход.
+    if not history or history[-1]["role"] == "assistant":
+        history = (history or []) + [
             {
                 "role": "user",
                 "content": "(тебя только что выбрали - представься и продолжи разговор)",
@@ -346,7 +348,11 @@ async def handle_start(message: Message):
     всю историю случайно.
     """
     user_id = message.from_user.id
-    if database.count_user_messages(user_id) > 0:
+    # «Осмысленное состояние» - не только написанные сообщения, но и любые
+    # выборы, которые юзер уже сделал (персона, гейт, описание внешности).
+    # Иначе повторный /start после клика по кнопке выбора персоны без единой
+    # реплики выглядел бы как первый запуск и затирал бы выбор молча.
+    if database.has_meaningful_state(user_id):
         history = database.get_history(user_id, HISTORY_LIMIT)
         lang = _detect_user_language(history)
         await message.answer(
@@ -442,6 +448,9 @@ async def on_persona_chosen(callback: CallbackQuery):
         return
 
     database.set_persona(user_id, key)
+    # Ручная смена персоны отменяет любое старое «ждём описание внешности» -
+    # иначе следующее сообщение (в т.ч. «Привіт») уйдёт в генератор портрета.
+    database.clear_stale_awaiting_description(user_id)
     if key == "mira":
         database.set_mira_activated_if_unset(user_id)
     await callback.message.answer(
@@ -463,6 +472,9 @@ async def on_adult_choice(callback: CallbackQuery):
         database.set_adult_confirmed(user_id)
         database.clear_adult_declined(user_id)
         database.set_persona(user_id, "mira")
+        # Любое предыдущее «ждём описание внешности» (если оно зависло после
+        # /newlook у другой персоны) - не актуально на момент свежего входа.
+        database.clear_stale_awaiting_description(user_id)
         database.set_mira_activated_if_unset(user_id)
         # Без «Дякую. Тепер поруч Міра» — даём ей самой написать первой
         # (так появление не выглядит как системное уведомление).

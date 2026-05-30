@@ -386,6 +386,83 @@ def get_mira_activated_at(user_id):
     return row[0] if row else None
 
 
+def has_meaningful_state(user_id):
+    """Есть ли у юзера хоть какое-то накопленное состояние, которое стоит сбросить.
+
+    Возвращает True, если есть сообщения, досье, или любое поле в `users`
+    отличается от дефолта (выбрана персона, подтверждён 18+, описана внешность
+    Миры, есть никнейм, активирована Мира, был отказ от гейта, сделаны фото).
+    Используется в /start, чтобы предложить подтверждение сброса в случаях,
+    когда юзер ещё не написал ни одного сообщения, но УЖЕ что-то нажал
+    (выбрал персону, прошёл гейт, начал описывать Миру и т.п.).
+    """
+    conn = _connect()
+    msgs = conn.execute(
+        "SELECT 1 FROM messages WHERE user_id = ? LIMIT 1", (user_id,)
+    ).fetchone()
+    if msgs:
+        conn.close()
+        return True
+    facts = conn.execute(
+        "SELECT 1 FROM user_facts WHERE user_id = ? LIMIT 1", (user_id,)
+    ).fetchone()
+    if facts:
+        conn.close()
+        return True
+    row = conn.execute(
+        """
+        SELECT persona, adult_confirmed, mira_look_status, mira_nickname,
+               mira_activated_at, adult_declined_at, photos_made
+        FROM users WHERE user_id = ?
+        """,
+        (user_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return False
+    persona, adult, look_status, nickname, activated, declined, photos = row
+    if persona and persona != "onboarding":
+        return True
+    if adult:
+        return True
+    if look_status and look_status != "none":
+        return True
+    if nickname:
+        return True
+    if activated:
+        return True
+    if declined:
+        return True
+    if photos:
+        return True
+    return False
+
+
+def clear_stale_awaiting_description(user_id):
+    """Сбросить «зависшее» ожидание описания внешности Миры.
+
+    Если юзер сделал /newlook, но не ответил - статус `awaiting_description`
+    остаётся и любое следующее сообщение («Привіт») будет интерпретировано
+    как описание внешности и сгенерит мусорный портрет. Этот хелпер чинит
+    ситуацию: если есть готовый базовый портрет - возвращаемся в 'ready',
+    иначе - в 'none'. Любой другой статус не трогаем (идемпотентно).
+    """
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    row = conn.execute(
+        "SELECT mira_look_status, mira_base_path FROM users WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    if row and row[0] == "awaiting_description":
+        new_status = "ready" if row[1] else "none"
+        conn.execute(
+            "UPDATE users SET mira_look_status = ? WHERE user_id = ?",
+            (new_status, user_id),
+        )
+        conn.commit()
+    conn.close()
+
+
 def wipe_user(user_id):
     """Полностью стереть данные конкретного пользователя (для сброса по /start).
 
