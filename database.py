@@ -80,6 +80,10 @@ def init_db():
         # Когда (и был ли) пользователь явно отказался от гейта 18+. Если стоит -
         # больше не предлагаем автоматически (только через ручной /persona).
         "adult_declined_at": "TEXT",
+        # Случайное «настоящее имя» для конкретного юзера. У каждого своё - чтобы
+        # был эффект приватности (а не у всех «Мира»). Генерится один раз при
+        # первой активации. Внутреннее кодовое имя модели (Мира) живёт в коде.
+        "mira_real_name": "TEXT",
     }
     for name, decl in mira_columns.items():
         if name not in existing:
@@ -317,6 +321,31 @@ def set_mira_name_revealed(user_id):
     _ensure_user(conn, user_id)
     conn.execute(
         "UPDATE users SET mira_name_status = 'revealed' WHERE user_id = ?", (user_id,)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_mira_real_name(user_id):
+    """Случайно сгенерированное «настоящее имя» Миры для этого юзера, или None."""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    row = conn.execute(
+        "SELECT mira_real_name FROM users WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    conn.commit()
+    conn.close()
+    return row[0] if row else None
+
+
+def set_mira_real_name_if_unset(user_id, name):
+    """Идемпотентно поставить «настоящее имя» Миры для юзера. Повторно не перезаписывает."""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    conn.execute(
+        "UPDATE users SET mira_real_name = ? "
+        "WHERE user_id = ? AND mira_real_name IS NULL",
+        (name, user_id),
     )
     conn.commit()
     conn.close()
