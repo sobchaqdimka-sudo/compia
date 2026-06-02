@@ -20,6 +20,7 @@ from config import (
     MEDIA_DIR,
     TALKING_MODEL,
     TALKING_RESOLUTION,
+    TEST_MODE,
     TTS_MODEL,
     TTS_VOICE,
     VIDEO_DURATION,
@@ -29,8 +30,13 @@ from config import (
 
 
 def is_enabled():
-    """Включены ли видео-кружочки (есть ключ fal.ai)."""
-    return bool(FAL_KEY)
+    """Включены ли видео-кружочки (есть ключ fal.ai). В TEST_MODE - всегда включены."""
+    return TEST_MODE or bool(FAL_KEY)
+
+
+def _test_stub_path(user_id, suffix):
+    """Заглушка пути для тестов; реальный файл не создаём."""
+    return os.path.join(MEDIA_DIR, str(user_id), f"test_{suffix}.mp4")
 
 
 def _client():
@@ -106,6 +112,9 @@ def _to_square_note_with_audio(video_src, audio_src, dest):
 
 def generate_circle(image_path, motion_prompt, user_id):
     """Сделать видео-кружок из фото. Вернуть путь к квадратному mp4."""
+    if TEST_MODE:
+        logging.info("[TEST_MODE] stub generate_circle user_id=%s", user_id)
+        return _test_stub_path(user_id, f"circle_{uuid.uuid4().hex[:8]}")
     fal_client = _client()
     image_url = fal_client.upload_file(image_path)
     result = fal_client.subscribe(
@@ -147,6 +156,9 @@ def generate_talking_circle(image_path, text, user_id):
     Шаги: TTS (ElevenLabs) -> аудио; затем фото + аудио -> видео (VEED Fabric);
     затем квадрат со звуком. Вернуть путь к mp4.
     """
+    if TEST_MODE:
+        logging.info("[TEST_MODE] stub generate_talking_circle user_id=%s", user_id)
+        return _test_stub_path(user_id, f"talking_{uuid.uuid4().hex[:8]}")
     fal_client = _client()
 
     tts = fal_client.subscribe(

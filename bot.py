@@ -50,6 +50,7 @@ from config import (
     ONBOARDING_MIN_MESSAGES,
     SUMMARY_HISTORY_LIMIT,
     TELEGRAM_TOKEN,
+    TEST_MODE,
 )
 
 # Подписи режимов проактивных сообщений (для кнопок и текста).
@@ -608,9 +609,10 @@ async def send_bubbles(chat_id, text):
         bubbles = ["..."]
     for bubble in bubbles:
         await bot.send_chat_action(chat_id=chat_id, action="typing")
-        # Длительность «печатания»: ~22мс на символ, в пределах 0.7–2.7с.
-        delay = 0.7 + min(2.0, len(bubble) * 0.022)
-        await asyncio.sleep(delay)
+        if not TEST_MODE:
+            # Длительность «печатания»: ~22мс на символ, в пределах 0.7–2.7с.
+            delay = 0.7 + min(2.0, len(bubble) * 0.022)
+            await asyncio.sleep(delay)
         await bot.send_message(chat_id, bubble)
 
 

@@ -15,12 +15,19 @@ import os
 import urllib.request
 import uuid
 
-from config import FAL_KEY, IMAGE_MODEL_BASE, IMAGE_MODEL_REF, MEDIA_DIR
+from config import FAL_KEY, IMAGE_MODEL_BASE, IMAGE_MODEL_REF, MEDIA_DIR, TEST_MODE
 
 
 def is_enabled():
-    """Включена ли генерация фото (есть ключ fal.ai)."""
-    return bool(FAL_KEY)
+    """Включена ли генерация фото (есть ключ fal.ai). В TEST_MODE - всегда включена."""
+    return TEST_MODE or bool(FAL_KEY)
+
+
+def _test_stub_path(user_id, suffix):
+    """Вернуть путь-заглушку для тестов: реальный файл не создаём (фейковый
+    transport не открывает его), достаточно строки."""
+    path = os.path.join(MEDIA_DIR, str(user_id), f"test_{suffix}.png")
+    return path
 
 
 def _client():
@@ -56,6 +63,9 @@ def _first_image_url(result):
 
 def generate_base_portrait(prompt, user_id):
     """Сгенерировать канонический портрет и сохранить как base.png. Вернуть путь."""
+    if TEST_MODE:
+        logging.info("[TEST_MODE] stub generate_base_portrait user_id=%s", user_id)
+        return _test_stub_path(user_id, "base")
     fal_client = _client()
     result = fal_client.subscribe(
         IMAGE_MODEL_BASE,
@@ -79,6 +89,9 @@ def generate_with_reference(instruction, reference_path, user_id):
     «сохрани ту же девушку, покажи в полный рост, повернись боком…».
     Вернуть путь к сохранённому файлу.
     """
+    if TEST_MODE:
+        logging.info("[TEST_MODE] stub generate_with_reference user_id=%s", user_id)
+        return _test_stub_path(user_id, f"edit_{uuid.uuid4().hex[:8]}")
     fal_client = _client()
     reference_url = fal_client.upload_file(reference_path)
     result = fal_client.subscribe(
