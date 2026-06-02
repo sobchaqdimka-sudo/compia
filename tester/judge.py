@@ -182,7 +182,7 @@ def judge(report: dict) -> dict:
     client = anthropic.Anthropic()
     resp = client.messages.create(
         model=JUDGE_MODEL,
-        max_tokens=2000,
+        max_tokens=4000,
         system=system,
         messages=[{"role": "user", "content": user_prompt}],
     )
