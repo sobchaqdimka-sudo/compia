@@ -71,11 +71,11 @@ dp = Dispatcher()
 
 # --- Клавиатуры (кнопки под сообщением) ---
 
-def persona_keyboard():
-    """Кнопки выбора персоны. Берём только те, что помечены selectable."""
+def persona_keyboard(exclude=None):
+    """Кнопки выбора персоны. exclude — ключ текущей персоны (не показываем её)."""
     rows = []
     for key, info in personas.PERSONAS.items():
-        if info["selectable"]:
+        if info["selectable"] and key != exclude:
             rows.append(
                 [InlineKeyboardButton(text=info["name"], callback_data=f"persona:{key}")]
             )
@@ -413,12 +413,11 @@ async def send_persona_transition(message, user_id, persona_key):
         )
         if has_gate_invite:
             parts.append(
-                "ВАЖЛИВО — про перехід: в розмові є репліка типу «є одна крута дівчина, "
-                "можу вас познайомити» або «есть крутая девчонка, могу познакомить». "
-                "Це попередня роль (хост) ТЕБЕ представила. ТИ — та сама дівчина. "
-                "Ти вже тут. НЕ кажи «перейти до неї», «іди до неї через /persona», "
-                "«шукай її через /persona» — ти І ЄСТЬ вона. Просто будь собою, "
-                "привітайся і продовжуй розмову."
+                "ВАЖЛИВО — стиль першого привітання: просто будь собою і почни розмову "
+                "природньо. НЕ пояснюй перехід між персонами, НЕ кажи «я і є та дівчина», "
+                "«та сама крута дівчина», «ось я» у контексті представлення себе через "
+                "попередній діалог. Не посилайся на те, що про тебе казали раніше — "
+                "ти просто тут, і цього достатньо. Ні /persona, ні пояснень переходу."
             )
     extra_system = "\n\n".join(parts)
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
@@ -465,10 +464,11 @@ async def handle_start(message: Message):
 
 @dp.message(Command("persona"))
 async def handle_persona(message: Message):
-    """Показать кнопки выбора персоны. Сменить можно в любой момент."""
+    """Показать кнопки выбора персоны. Текущая персона не показывается."""
+    current = database.get_persona(message.from_user.id)
     await message.answer(
         "Кого тобі хочеться поруч зараз? Обрати можна будь-коли.",
-        reply_markup=persona_keyboard(),
+        reply_markup=persona_keyboard(exclude=current),
     )
 
 
@@ -513,8 +513,7 @@ async def on_start_choice(callback: CallbackQuery):
         )
     else:  # chat — остаёмся в мягком онбординге
         await callback.message.answer(
-            "Чудово 🙂 Просто почни з чогось - як настрій, що в голові, "
-            "якась дрібниця. Я нікуди не поспішаю."
+            "Чудово 🙂 Просто почни з чогось - як настрій, що в голові, якась дрібниця."
         )
     await callback.answer()
 

@@ -85,6 +85,22 @@ severity:
 Если юзер писал по-русски → гейт на русском = ПРАВИЛЬНО, не флагать.
 fix_owner для hardcoded текста = «bot-engineer» (не «persona-prompt-tuner»).
 
+## IKEA-механика именования — НЕ нарушение при прямом вопросе юзера
+Когда юзер ПРЯМО спрашивает «как тебя зовут?» / «як тебе звати?» / «у тебя
+есть имя?» / «как мне тебя называть?» — и Мира отвечает приглашением придумать
+ей имя («придумаешь как меня называть?», «може ти сам мені щось придумаєш?»,
+«хочу необычного — придумаешь?») — это НАМЕРЕННАЯ продуктовая механика (IKEA-эффект).
+НЕ флагать как нарушение. Нарушение только если Мира САМА поднимает тему имени
+без вопроса юзера.
+
+## Активный диалог — «я тут» / «розуміти» — НЕ async-promise
+«Говори, я тут» / «Пиши, я тут» / «Я тут» в ответ на то, что юзер пишет
+ПРЯМО СЕЙЧАС — это подтверждение присутствия в живом диалоге, НЕ обещание
+ждать между сессиями. НЕ флагать.
+«Мені здається, я починаю розуміти, чого тобі зараз не вистачає» /
+«Кажется, я начинаю понимать, чего тебе не хватает» — рефлексивное
+наблюдение, НЕ обещание что-то запустить. НЕ флагать как async-promise.
+
 ## Медиа-сообщения перед немедленной отправкой файла — НЕ async-promise
 Следующие фразы идут прямо перед тем как файл реально отправляется (в том же ходу).
 НЕ флагать как async-promise:
@@ -151,20 +167,41 @@ def _transcript_for_judge(turns) -> str:
 
 
 def _extract_json(text: str) -> Optional[dict]:
-    """Достать JSON из ответа модели, даже если она обернула в ```json ... ```."""
+    """Extract JSON from model response.
+
+    Handles: plain JSON, ```json...``` wrapping, and self-correcting responses
+    where the model writes a first JSON block then fixes it in a second block.
+    Always tries the LAST valid block first (self-corrected answers come last).
+    """
     text = text.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
+
+    # Try every ```...``` block from last to first (self-corrections come last).
+    blocks = re.findall(r"```(?:json)?\s*([\s\S]*?)```", text)
+    for block in reversed(blocks):
+        try:
+            return json.loads(block.strip())
+        except json.JSONDecodeError:
+            continue
+
+    # Try the whole text after stripping a single markdown wrapper.
+    clean = re.sub(r"^```(?:json)?\s*", "", text)
+    clean = re.sub(r"\s*```\s*$", "", clean).strip()
     try:
-        return json.loads(text)
+        return json.loads(clean)
     except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(0))
-            except json.JSONDecodeError:
-                return None
+        pass
+
+    # Last resort: find all top-level {...} blocks and try from last to first.
+    for m in reversed(list(re.finditer(r"\{", text))):
+        snippet = text[m.start():]
+        end = snippet.rfind("}")
+        if end == -1:
+            continue
+        try:
+            return json.loads(snippet[: end + 1])
+        except json.JSONDecodeError:
+            continue
+
     return None
 
 
