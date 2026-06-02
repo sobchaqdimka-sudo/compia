@@ -22,7 +22,7 @@ def _load_text(path: str) -> str:
         return f.read()
 
 
-def _build_judge_system(scenario_checks: list[str]) -> str:
+def _build_judge_system(scenario_checks) -> str:
     claude_md = _load_text("CLAUDE.md")
     common = _load_text("personas/common.txt")
 
@@ -76,7 +76,7 @@ severity:
 """
 
 
-def _transcript_for_judge(turns: list[dict]) -> str:
+def _transcript_for_judge(turns) -> str:
     """Сделать читабельный транскрипт для судьи."""
     lines = []
     for t in turns:

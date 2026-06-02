@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 import sys
+from typing import Optional
 
 from .scenarios import SCENARIOS
 from .simulator import dump_report, run_scenario
@@ -24,7 +25,7 @@ def _setup_test_mode():
     os.environ.setdefault("TELEGRAM_TOKEN", "123456789:AAEtestplaceholderAAAAAAAAAAAAAAAAAAA")
 
 
-def _print_report(report: dict, judge_result: dict | None):
+def _print_report(report: dict, judge_result):  # type: Optional[dict]
     print()
     print("=" * 70)
     print(f"SCENARIO:  {report['scenario']}")
