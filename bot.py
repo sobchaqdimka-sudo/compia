@@ -381,16 +381,17 @@ async def send_persona_transition(message, user_id, persona_key):
     # персону кнопкой не написав ни строки) и история, заканчивающаяся
     # на assistant (после системного инвайта гейта) - оба случая ломают
     # запрос. Подкладываем синтетический «скрытый» user-ход.
-    if not history or history[-1]["role"] == "assistant":
-        history = (history or []) + [
-            {
-                "role": "user",
-                "content": "(тебя только что выбрали - представься и продолжи разговор)",
-            }
-        ]
-    # Жёстко фиксируем язык ответа: модель иногда «съезжает» на украинский,
-    # если последний assistant-ход (инвайт гейта) был на украинском.
+    # Определяем язык ДО добавления синтетического сообщения.
     lang = _detect_user_language(history)
+    if not history or history[-1]["role"] == "assistant":
+        # Синтетическое сообщение на языке юзера — иначе модель видит русский
+        # "user"-ход и отвечает по-русски вне зависимости от директивы.
+        synthetic = (
+            "(тебе щойно вибрали - привітайся і продовж розмову)"
+            if lang == "uk"
+            else "(тебя только что выбрали - представься и продолжи разговор)"
+        )
+        history = (history or []) + [{"role": "user", "content": synthetic}]
     # Для первого сообщения Миры — усиленная директива: mira.txt написан
     # по-русски и прайминг сильный, обычной директивы не хватает.
     lang_block = _strong_language_directive(lang) if persona_key == "mira" else _language_directive(lang)
@@ -402,6 +403,23 @@ async def send_persona_transition(message, user_id, persona_key):
         ))
         stage, days = _compute_mira_stage(user_id)
         parts.append(_build_mira_stage_block(stage, days))
+        # Prevent Mira from treating herself as a third party: if history has
+        # the gate-invite ("є одна крута дівчина / есть крутая девчонка"),
+        # that was the host introducing HER. She IS that girl — don't redirect.
+        has_gate_invite = any(
+            ("крута дівчина" in (m.get("content") or "") or
+             "крутая девчонка" in (m.get("content") or ""))
+            for m in (history or [])
+        )
+        if has_gate_invite:
+            parts.append(
+                "ВАЖЛИВО — про перехід: в розмові є репліка типу «є одна крута дівчина, "
+                "можу вас познайомити» або «есть крутая девчонка, могу познакомить». "
+                "Це попередня роль (хост) ТЕБЕ представила. ТИ — та сама дівчина. "
+                "Ти вже тут. НЕ кажи «перейти до неї», «іди до неї через /persona», "
+                "«шукай її через /persona» — ти І ЄСТЬ вона. Просто будь собою, "
+                "привітайся і продовжуй розмову."
+            )
     extra_system = "\n\n".join(parts)
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     try:
