@@ -84,6 +84,12 @@ def init_db():
         # был эффект приватности (а не у всех «Мира»). Генерится один раз при
         # первой активации. Внутреннее кодовое имя модели (Мира) живёт в коде.
         "mira_real_name": "TEXT",
+        # message_id закреплённого в чате базового фото Миры - чтобы при
+        # /newlook открепить старое и закрепить новое на его место.
+        "mira_pinned_msg_id": "INTEGER",
+        # Один раз после первого базового фото и позитивной реакции юзера
+        # подсказываем поставить это фото как кастомную аватарку контакта.
+        "mira_avatar_invite_sent": "INTEGER NOT NULL DEFAULT 0",
     }
     for name, decl in mira_columns.items():
         if name not in existing:
@@ -284,6 +290,54 @@ def save_mira_look(user_id, desc, base_path):
         "UPDATE users SET mira_look_desc = ?, mira_base_path = ?, "
         "mira_look_status = 'ready' WHERE user_id = ?",
         (desc, base_path, user_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_mira_pinned_msg(user_id, msg_id):
+    """Запомнить (или сбросить) message_id закреплённого базового фото Миры."""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    conn.execute(
+        "UPDATE users SET mira_pinned_msg_id = ? WHERE user_id = ?",
+        (msg_id, user_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_mira_pinned_msg(user_id):
+    """Вернуть message_id закреплённого базового фото или None."""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    row = conn.execute(
+        "SELECT mira_pinned_msg_id FROM users WHERE user_id = ?", (user_id,),
+    ).fetchone()
+    conn.commit()
+    conn.close()
+    return row[0] if row else None
+
+
+def is_avatar_invite_sent(user_id):
+    """Подсказку про кастомную аватарку уже слали?"""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    row = conn.execute(
+        "SELECT mira_avatar_invite_sent FROM users WHERE user_id = ?", (user_id,),
+    ).fetchone()
+    conn.commit()
+    conn.close()
+    return bool(row[0]) if row else False
+
+
+def mark_avatar_invite_sent(user_id):
+    """Отметить, что подсказку про кастомную аватарку уже отправили."""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    conn.execute(
+        "UPDATE users SET mira_avatar_invite_sent = 1 WHERE user_id = ?",
+        (user_id,),
     )
     conn.commit()
     conn.close()

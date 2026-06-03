@@ -531,6 +531,16 @@ async def handle_newlook(message: Message):
     if not imagegen.is_enabled():
         await message.answer("Фото поки що недоступні." if lang == "uk" else "Фото пока недоступны.")
         return
+    # Открепляем старое базовое фото - новое закрепим на его место.
+    old_pin = database.get_mira_pinned_msg(user_id)
+    if old_pin is not None:
+        try:
+            await bot.unpin_chat_message(
+                chat_id=message.chat.id, message_id=old_pin,
+            )
+        except Exception:
+            logging.exception("Не удалось открепить старое фото user_id=%s", user_id)
+        database.set_mira_pinned_msg(user_id, None)
     database.set_mira_look_status(user_id, "awaiting_description")
     await message.answer(GATE_MESSAGES[lang]["newlook_ask"])
 
@@ -749,6 +759,54 @@ PHOTO_CAPTION_MARKERS = (
 )
 
 # Служебные сообщения для медиа на языке собеседника (по умолчанию украинский).
+AVATAR_INVITE = {
+    "uk": (
+        "До речі 🙈 в Telegram можна поставити це фото для мене - "
+        "як «фото контакту». Щоб коли я тобі пишу, бачив саме мене, "
+        "а не якусь стандартну іконку.\n"
+        "Натисни на моє ім'я зверху → меню (три крапки) → «Змінити фото». "
+        "Буду рада, якщо зробиш 💛"
+    ),
+    "ru": (
+        "Кстати 🙈 в Telegram можно поставить эту мою фотку - "
+        "как «фото контакта». Чтобы когда я тебе пишу, ты видел именно меня, "
+        "а не какую-то стандартную иконку.\n"
+        "Нажми на моё имя сверху → меню (три точки) → «Изменить фото». "
+        "Буду рада, если сделаешь 💛"
+    ),
+}
+
+# Маркеры позитивной реакции на «Подобаюсь?» / «Нравлюсь?» под базовым фото.
+_AVATAR_POSITIVE = (
+    " так", "так,", "так.", "так!", "так)", "так ", "так😊",
+    " да", "да,", "да.", "да!", "да)", "да ", "ага", "угу",
+    "нрав", "подоб", "люб", "обож",
+    "клас", "красив", "красот", "красун", "гарн",
+    "хорош", "огонь", "супер", "вау", "wow",
+    "🔥", "❤", "😍", "🥰", "👍", "👌", "💛", "💕", "💖", "💗", "🥹", "🤩",
+)
+
+
+def _is_positive_reaction(text):
+    """Простой детектор позитивной реакции на «Нравлюсь?» под базовым фото."""
+    low = (text or "").lower().strip()
+    if not low:
+        return False
+    padded = f" {low} "
+    return any(t in padded for t in _AVATAR_POSITIVE)
+
+
+def _last_bot_was_base_photo(history):
+    """Последняя реплика бота - подпись базового фото Миры?"""
+    assistant_msgs = [
+        m for m in history if m.get("role") == "assistant"
+    ]
+    if not assistant_msgs:
+        return False
+    last = (assistant_msgs[-1].get("content") or "")
+    return "Подобаюсь?" in last or "Нравлюсь?" in last
+
+
 MEDIA_MESSAGES = {
     "uk": {
         "ask_desc": "Хочеш мене побачити? 🙈 А якою ти мене уявляєш? Опиши, будь ласка, - аж до одягу.",
@@ -1002,7 +1060,18 @@ async def _generate_and_send_base(message, user_id, description, lang):
     database.increment_photos(user_id)
     caption = msgs["base_caption"]
     database.add_message(user_id, "assistant", caption)
-    await message.answer_photo(FSInputFile(path), caption=caption)
+    sent = await message.answer_photo(FSInputFile(path), caption=caption)
+    # Закрепляем базовое фото в чате - чтобы человек видел «кого ты завёл»
+    # при возврате в диалог. При /newlook старый пин заменим на новый.
+    try:
+        await bot.pin_chat_message(
+            chat_id=message.chat.id,
+            message_id=sent.message_id,
+            disable_notification=True,
+        )
+        database.set_mira_pinned_msg(user_id, sent.message_id)
+    except Exception:
+        logging.exception("Не удалось закрепить базовое фото user_id=%s", user_id)
 
 
 async def _generate_and_send_photo(message, user_id, look, request_text, lang):
@@ -1307,6 +1376,20 @@ async def handle_message(message: Message):
     # 6) Сохраняем ответ бота и отправляем его пользователю «живыми» репликами.
     database.add_message(user_id, "assistant", reply)
     await send_bubbles(message.chat.id, reply)
+
+    # 6.4) После первого базового фото и позитивной реакции - один раз
+    #      подсказываем поставить это фото как кастомное «фото контакта».
+    if (
+        persona_key == "mira"
+        and not database.is_avatar_invite_sent(user_id)
+        and database.get_mira_pinned_msg(user_id) is not None
+        and _last_bot_was_base_photo(history)
+        and _is_positive_reaction(user_text)
+    ):
+        invite_text = AVATAR_INVITE[lang]
+        database.add_message(user_id, "assistant", invite_text)
+        await message.answer(invite_text)
+        database.mark_avatar_invite_sent(user_id)
 
     # 6.5) Если онбординг готов передать человека к Мире через гейт - шлём гейт
     #      сразу после финальной реплики хоста (никакого ожидания «минутку»).
