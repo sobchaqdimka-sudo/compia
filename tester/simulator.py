@@ -120,6 +120,34 @@ def _collect_milestones(persona_before: str, events: List[Event], db_module) -> 
     if any(e.kind == "photo" for e in events):
         hits.append("photo_generated")
 
+    # Текстовые milestones из самих ответов бота.
+    bot_text = " ".join((e.text or "") for e in events if e.kind == "text").lower()
+
+    if any(s in bot_text for s in ("штучний інтелект", "искусственный интеллект")):
+        hits.append("ai_acknowledged")
+
+    if "/persona" in bot_text:
+        hits.append("persona_command_mentioned")
+
+    # Mira пригласила придумать ей имя (IKEA-механика).
+    invite_phrases = (
+        "придумай", "придумаєш", "придумаешь", "придумаешь", "придумать",
+        "придумав", "назвав", "назвеш", "назовёшь", "называти", "называть",
+        "сам мені", "сам мне", "як мене", "как меня",
+    )
+    name_words = ("ім", "имя")
+    if (any(p in bot_text for p in invite_phrases)
+            and any(w in bot_text for w in name_words)):
+        hits.append("mira_invited_nickname")
+
+    # Никнейм принят: db.mira_name_state.status == 'nicknamed'.
+    try:
+        name_state = db_module.get_mira_name_state(TEST_UID)
+        if name_state and name_state.get("status") == "nicknamed":
+            hits.append("nickname_used")
+    except Exception:
+        pass
+
     return hits
 
 
