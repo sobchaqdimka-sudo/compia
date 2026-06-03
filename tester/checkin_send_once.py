@@ -152,9 +152,13 @@ async def _main(args):
     # Реальная отправка. Мы НЕ зовём bot.run_checkins() напрямую (если хочешь
     # отправить только --only). Воспроизводим её логику с явным списком.
     from ai import generate_checkin
+    from config import HISTORY_LIMIT
     for uid, persona, facts in due:
         try:
-            text = await asyncio.to_thread(generate_checkin, persona, facts)
+            history = database.get_history(uid, HISTORY_LIMIT)
+            text = await asyncio.to_thread(
+                generate_checkin, persona, facts, history,
+            )
             await bot_module.send_bubbles(uid, text)
             database.add_message(uid, "assistant", text)
             database.set_last_checkin(uid)

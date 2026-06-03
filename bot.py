@@ -1289,8 +1289,15 @@ async def run_checkins():
     due = await asyncio.to_thread(database.get_due_checkin_users)
     for user_id, persona_key, facts in due:
         try:
+            # Подтягиваем последний кусок переписки, чтобы check-in продолжал
+            # тему, а не начинал заново.
+            history = await asyncio.to_thread(
+                database.get_history, user_id, HISTORY_LIMIT,
+            )
             # Текст генерируем в отдельном потоке (запрос к Anthropic блокирующий).
-            text = await asyncio.to_thread(generate_checkin, persona_key, facts)
+            text = await asyncio.to_thread(
+                generate_checkin, persona_key, facts, history,
+            )
             await send_bubbles(user_id, text)
             # Сохраняем как сообщение бота, чтобы сохранить непрерывность диалога.
             database.add_message(user_id, "assistant", text)

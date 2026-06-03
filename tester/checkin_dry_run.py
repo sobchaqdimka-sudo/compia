@@ -23,8 +23,13 @@ import sys
 from typing import Optional, Tuple
 
 
-def _read_user(db_path: str, user_id: int) -> Optional[Tuple[str, str]]:
-    """Прочитать (persona, facts) из companion.db. None если юзера нет / БД нет."""
+def _read_user(db_path: str, user_id: int, history_limit: int = 16
+               ) -> Optional[Tuple[str, str, list]]:
+    """Прочитать (persona, facts, recent_history) из companion.db.
+
+    Возвращает None если юзера/БД нет. recent_history - последние
+    history_limit сообщений в формате [{role, content}, ...] (хронологично).
+    """
     if not os.path.exists(db_path):
         return None
     conn = sqlite3.connect(db_path)
@@ -39,7 +44,14 @@ def _read_user(db_path: str, user_id: int) -> Optional[Tuple[str, str]]:
             "SELECT facts FROM user_facts WHERE user_id = ?", (user_id,),
         ).fetchone()
         facts = f_row[0] if f_row else ""
-        return persona, facts
+        msg_rows = conn.execute(
+            "SELECT role, content FROM messages WHERE user_id = ? "
+            "ORDER BY id DESC LIMIT ?",
+            (user_id, history_limit),
+        ).fetchall()
+        # SELECT DESC + reverse → хронологический порядок.
+        history = [{"role": r, "content": c} for r, c in reversed(msg_rows)]
+        return persona, facts, history
     finally:
         conn.close()
 
@@ -81,15 +93,17 @@ def main():
     user = _read_user(args.db, args.user_id)
     persona = args.persona
     facts = ""
+    history = []
     if user is not None:
-        db_persona, db_facts = user
+        db_persona, db_facts, db_history = user
         persona = persona or db_persona
         facts = db_facts
+        history = db_history
     else:
         persona = persona or "mira"
         print(
             f"⚠ user_id={args.user_id} не знайдено в {args.db}. "
-            f"Беру дефолти: persona='{persona}', порожнє досьє.\n"
+            f"Беру дефолти: persona='{persona}', порожнє досьє, порожня історія.\n"
         )
     if args.facts_file:
         with open(args.facts_file, encoding="utf-8") as f:
@@ -99,6 +113,13 @@ def main():
     print(f"DRY-RUN check-in")
     print(f"user_id: {args.user_id}")
     print(f"persona: {persona}")
+    print(f"останніх повідомлень в історії: {len(history)}")
+    if history:
+        last_two = history[-2:]
+        for m in last_two:
+            who = "user" if m["role"] == "user" else "Mira"
+            content = (m["content"] or "")[:120].replace("\n", " ")
+            print(f"  [{who}] {content}")
     print(f"досьє:")
     _print_facts_summary(facts or "")
     print("=" * 70)
@@ -109,7 +130,7 @@ def main():
 
     for i in range(1, args.variants + 1):
         try:
-            text = generate_checkin(persona, facts)
+            text = generate_checkin(persona, facts, history)
         except Exception as e:
             print(f"❌ Варіант {i}: помилка генерації — {e}")
             continue
