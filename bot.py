@@ -1083,7 +1083,8 @@ async def _generate_and_send_circle(message, user_id, look, request_text, lang):
 async def _generate_and_send_base(message, user_id, description, lang):
     """Создать канонический портрет Миры по описанию и отправить его."""
     msgs = MEDIA_MESSAGES[lang]
-    await message.answer(msgs["base_wait"])
+    # Раньше тут было "Хорошо 💛" - убрал, индикатор upload_photo сам всё
+    # покажет, а отдельная коротенькая реплика звучала как ботский ack.
     keep = asyncio.create_task(_keep_action(message.chat.id, "upload_photo"))
     path = None
     try:
@@ -1101,26 +1102,10 @@ async def _generate_and_send_base(message, user_id, description, lang):
     caption = msgs["base_caption"]
     database.add_message(user_id, "assistant", caption)
     sent = await message.answer_photo(FSInputFile(path), caption=caption)
-    # Закрепляем базовое фото в чате - чтобы человек видел «кого ты завёл»
-    # при возврате в диалог. При /newlook старый пин заменим на новый.
-    # В ЛС с ботом TG разрешает пин без прав админа, но иногда возвращает
-    # «not enough rights» - логируем явно, чтобы было видно причину.
-    try:
-        await bot.pin_chat_message(
-            chat_id=message.chat.id,
-            message_id=sent.message_id,
-            disable_notification=True,
-        )
-        database.set_mira_pinned_msg(user_id, sent.message_id)
-        logging.info(
-            "Закрепили базовое фото user_id=%s msg_id=%s",
-            user_id, sent.message_id,
-        )
-    except Exception as e:
-        logging.warning(
-            "Не удалось закрепить базовое фото user_id=%s: %s: %s",
-            user_id, type(e).__name__, e,
-        )
+    # Закреплять СРАЗУ нельзя - юзер ещё не подтвердил, что нравится.
+    # Запомним msg_id, закрепим позже когда придёт позитивная реакция
+    # (см. ветку 6.4 в handle_message).
+    database.set_mira_base_photo_msg(user_id, sent.message_id)
 
 
 async def _generate_and_send_photo(message, user_id, look, request_text, lang):
@@ -1240,6 +1225,15 @@ async def _photo_payload(photo_size):
 @dp.message()
 async def handle_message(message: Message):
     """Главный обработчик: на текст или фото от пользователя — ответ персоны."""
+    # Сервисные события Telegram (закрепление, открепление, новые участники)
+    # приходят как Message без text/photo. На них отвечать НЕ нужно, иначе
+    # бот отвечает сам себе на собственное pin_chat_message.
+    if (
+        message.pinned_message is not None
+        or getattr(message, "new_chat_members", None)
+        or getattr(message, "left_chat_member", None)
+    ):
+        return
     # Принимаем текст и фото (с подписью или без); прочее (стикеры, голосовые)
     # пока пропускаем.
     if not message.text and not message.photo:
@@ -1426,22 +1420,44 @@ async def handle_message(message: Message):
     database.add_message(user_id, "assistant", reply)
     await send_bubbles(message.chat.id, reply)
 
-    # 6.4) После первого базового фото и позитивной реакции - один раз
-    #      подсказываем поставить это фото как кастомное «фото контакта».
-    #      Условие не зависит от пина: если он сломался по правам, инвайт
-    #      всё равно должен прилететь.
+    # 6.4) Реакция на базовое фото. Пин и avatar-invite триггерим только
+    #      ПОСЛЕ позитивной реакции юзера ("нравится", "красива", "🔥", ...).
+    #      Пин - на каждое новое базовое фото (после /newlook тоже).
+    #      Invite-текст - только один раз за всё время.
     if (
         persona_key == "mira"
-        and not database.is_avatar_invite_sent(user_id)
-        and database.get_mira_look(user_id)["base_path"] is not None
         and _last_bot_was_base_photo(history)
         and _is_positive_reaction(user_text)
     ):
-        invite_text = AVATAR_INVITE[lang]
-        database.add_message(user_id, "assistant", invite_text)
-        await message.answer(invite_text)
-        database.mark_avatar_invite_sent(user_id)
-        logging.info("Отправили avatar-invite user_id=%s lang=%s", user_id, lang)
+        base_msg_id = database.get_mira_base_photo_msg(user_id)
+        if base_msg_id is not None:
+            # Пин, если ещё не закреплён именно этот msg_id.
+            if database.get_mira_pinned_msg(user_id) != base_msg_id:
+                try:
+                    await bot.pin_chat_message(
+                        chat_id=message.chat.id,
+                        message_id=base_msg_id,
+                        disable_notification=True,
+                    )
+                    database.set_mira_pinned_msg(user_id, base_msg_id)
+                    logging.info(
+                        "Закрепили базовое фото user_id=%s msg_id=%s",
+                        user_id, base_msg_id,
+                    )
+                except Exception as e:
+                    logging.warning(
+                        "Не удалось закрепить базовое фото user_id=%s: %s: %s",
+                        user_id, type(e).__name__, e,
+                    )
+            # Подсказка про кастомную аватарку - только один раз.
+            if not database.is_avatar_invite_sent(user_id):
+                invite_text = AVATAR_INVITE[lang]
+                database.add_message(user_id, "assistant", invite_text)
+                await message.answer(invite_text)
+                database.mark_avatar_invite_sent(user_id)
+                logging.info(
+                    "Отправили avatar-invite user_id=%s lang=%s", user_id, lang,
+                )
 
     # 6.5) Если онбординг готов передать человека к Мире через гейт - шлём гейт
     #      сразу после финальной реплики хоста (никакого ожидания «минутку»).

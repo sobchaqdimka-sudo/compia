@@ -87,6 +87,9 @@ def init_db():
         # message_id закреплённого в чате базового фото Миры - чтобы при
         # /newlook открепить старое и закрепить новое на его место.
         "mira_pinned_msg_id": "INTEGER",
+        # message_id последнего отправленного базового фото (закреплено ещё
+        # или нет). Закрепляем только после положительной реакции юзера.
+        "mira_base_photo_msg_id": "INTEGER",
         # Один раз после первого базового фото и позитивной реакции юзера
         # подсказываем поставить это фото как кастомную аватарку контакта.
         "mira_avatar_invite_sent": "INTEGER NOT NULL DEFAULT 0",
@@ -313,6 +316,30 @@ def get_mira_pinned_msg(user_id):
     _ensure_user(conn, user_id)
     row = conn.execute(
         "SELECT mira_pinned_msg_id FROM users WHERE user_id = ?", (user_id,),
+    ).fetchone()
+    conn.commit()
+    conn.close()
+    return row[0] if row else None
+
+
+def set_mira_base_photo_msg(user_id, msg_id):
+    """Запомнить (или сбросить) message_id последнего отправленного базового фото."""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    conn.execute(
+        "UPDATE users SET mira_base_photo_msg_id = ? WHERE user_id = ?",
+        (msg_id, user_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_mira_base_photo_msg(user_id):
+    """Вернуть message_id последнего базового фото (закреплено или нет)."""
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    row = conn.execute(
+        "SELECT mira_base_photo_msg_id FROM users WHERE user_id = ?", (user_id,),
     ).fetchone()
     conn.commit()
     conn.close()
