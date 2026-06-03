@@ -63,32 +63,26 @@ def _ask_user(turns_for_llm: List[dict]) -> str:
     return text or "..."
 
 
-def _fast_forward(days_ago: int, min_user_msgs: int):
-    """Перемотать `mira_activated_at` назад и долить фейковых user-сообщений."""
-    import database
-    conn = sqlite3.connect(database.DB_PATH)
-    conn.execute(
-        "UPDATE users SET mira_activated_at = datetime('now', ?) "
-        "WHERE user_id = ?",
-        (f"-{days_ago} days", TEST_UID),
-    )
-    cur = conn.execute(
-        "SELECT COUNT(*) FROM messages WHERE user_id = ? AND role = 'user'",
-        (TEST_UID,),
-    )
-    have = cur.fetchone()[0]
-    to_add = max(0, min_user_msgs - have)
-    for i in range(to_add):
-        conn.execute(
-            "INSERT INTO messages (user_id, role, content) "
-            "VALUES (?, 'user', ?)",
-            (TEST_UID, f"(пропущена розмова #{i+1})"),
-        )
-    conn.commit()
-    conn.close()
+def _fast_forward(target_stage: int):
+    """Перевести Миру в нужную стадию отношений без мусора в БД.
+
+    Раньше: пихали в messages фейковые «(пропущена розмова)» чтобы добить
+    `count_user_messages` до >=80 для stage 3 - это засирало history, и Мира
+    начинала видеть собственные галлюцинации как «прошлое». Теперь:
+    monkey-patch `bot._compute_mira_stage` чтобы он вернул нужную пару
+    (stage, days). История разговора остаётся ЧИСТОЙ.
+    """
+    import bot as bot_module
+    days_map = {1: 0, 2: 2, 3: 5}
+    days = days_map.get(target_stage, 0)
+
+    def _patched(user_id):
+        return target_stage, days
+
+    bot_module._compute_mira_stage = _patched
     LOG.info(
-        "  ⏩ FAST-FORWARD: mira_activated -%dd, дозалив %d фейкових user-msg "
-        "(зараз %d)", days_ago, to_add, max(have, min_user_msgs),
+        "  ⏩ FAST-FORWARD: stage=%d (days=%d), history залишена чиста",
+        target_stage, days,
     )
 
 
@@ -171,7 +165,7 @@ async def run_arc(keep_db: bool = False) -> dict:
         phase_segments[1] = turns_all[phase1_start_idx:]
 
         # Промотка к Phase 2.
-        _fast_forward(days_ago=2, min_user_msgs=26)
+        _fast_forward(target_stage=2)
 
         LOG.info("--- PHASE 2: зближення ---")
         phase2_start_idx = len(turns_all)
@@ -181,7 +175,7 @@ async def run_arc(keep_db: bool = False) -> dict:
         phase_segments[2] = turns_all[phase2_start_idx:]
 
         # Промотка к Phase 3.
-        _fast_forward(days_ago=5, min_user_msgs=82)
+        _fast_forward(target_stage=3)
 
         LOG.info("--- PHASE 3: своя ---")
         phase3_start_idx = len(turns_all)
