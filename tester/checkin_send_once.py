@@ -97,9 +97,19 @@ async def _main(args):
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
+    # Подгружаем .env до проверки токена и до import bot
+    # (bot.py при импорте сам читает config с requirement on TELEGRAM_TOKEN).
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
+
     if not os.getenv("TELEGRAM_TOKEN"):
         print("❌ TELEGRAM_TOKEN не задано в .env. Скрипт реально шле в Telegram, "
               "тож токен обов'язковий.")
+        print("   Перевір: чи є файл .env в корені проекту і чи є там рядок "
+              "TELEGRAM_TOKEN=...")
         return 1
 
     import bot as bot_module
