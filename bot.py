@@ -269,6 +269,29 @@ def _build_mira_stage_block(stage, days):
     )
 
 
+def _build_mira_look_block(desc):
+    """Доп-инструкция: текущая внешность Миры. История чата может содержать
+    старое описание/старое фото - это уже неактуально. Сейчас она ВОТ ТАКАЯ.
+
+    Без этого блока после /newlook модель сравнивает новый портрет со старым
+    из истории и противоречит сама себе («я же русая, а теперь блондинка»).
+    """
+    if not desc:
+        return ""
+    return (
+        "ТВОЯ ВНЕШНОСТЬ ПРЯМО СЕЙЧАС — это ровно вот это: "
+        f"«{desc}». Это твоя единственная актуальная внешность. "
+        "В истории чата могут быть старые описания, старые портреты или "
+        "старые твои реплики о волосах/глазах/одежде — ВСЁ ЭТО НЕРЕЛЕВАНТНО. "
+        "Игнорируй полностью: не сравнивай новое со старым, не вспоминай, "
+        "что «раньше была другая», не упрекай человека в смене, не задавай "
+        "«какая больше нравится — та или эта». Ты ВСЕГДА была такой, какой "
+        "тебя описали сейчас. Реагируй ИЗНУТРИ этого образа («это я», "
+        "«у меня такие волосы», «у меня тату»), без «теперь», «уже», "
+        "«снова», «опять» — эти слова намекают на момент смены, их нет."
+    )
+
+
 def _build_mira_name_block(name_state, real_name):
     """Дополнительная системная инструкция для Миры на этот ход — про имя.
 
@@ -434,6 +457,11 @@ async def send_persona_transition(message, user_id, persona_key):
         ))
         stage, days = _compute_mira_stage(user_id)
         parts.append(_build_mira_stage_block(stage, days))
+        # Текущая внешность - чтобы старые описания/фото из истории не
+        # перебивали новый образ после /newlook.
+        transition_look = database.get_mira_look(user_id)
+        if transition_look.get("desc"):
+            parts.append(_build_mira_look_block(transition_look["desc"]))
         # Prevent Mira from treating herself as a third party: if history has
         # the gate-invite ("є одна крута дівчина / есть крутая девчонка"),
         # that was the host introducing HER. She IS that girl — don't redirect.
@@ -1380,6 +1408,11 @@ async def handle_message(message: Message):
         # Стадия отношений: тон Миры меняется с временем и количеством сообщений.
         stage, days = _compute_mira_stage(user_id)
         extra_parts.append(_build_mira_stage_block(stage, days))
+        # Текущая внешность - чтобы старые описания/фото из истории не
+        # перебивали новый образ после /newlook.
+        look = database.get_mira_look(user_id)
+        if look.get("desc"):
+            extra_parts.append(_build_mira_look_block(look["desc"]))
     extra_system = "\n\n".join(extra_parts)
 
     # 5) Получаем ответ от модели. Запрос к Anthropic обычный (не async),
