@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Compia — структура продукта и агенты</title>
+<style>
+:root{
+  --bg:#0e1116; --panel:#161b22; --panel2:#1c232c; --border:#2a3340;
+  --txt:#e6edf3; --mut:#8b949e; --accent:#ffd23f; --ok:#3fb950;
+  --eng:#58a6ff; --tune:#d2a8ff; --po:#ff7b72; --qa:#f0883e;
+  --skill:#79c0ff; --media:#a5d6ff;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif}
+.wrap{max-width:1280px;margin:0 auto;padding:32px 28px 60px}
+h1{margin:0 0 6px;font-size:28px;font-weight:700}
+.sub{color:var(--mut);font-size:14px;margin-bottom:36px}
+h2{font-size:18px;margin:42px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+h3{font-size:14px;margin:18px 0 8px;color:var(--mut);text-transform:uppercase;letter-spacing:.06em;font-weight:600}
+.grid{display:grid;gap:14px}
+.g2{grid-template-columns:1fr 1fr}
+.g3{grid-template-columns:repeat(3,1fr)}
+.g4{grid-template-columns:repeat(4,1fr)}
+@media (max-width:960px){.g2,.g3,.g4{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:16px}
+.card h4{margin:0 0 6px;font-size:14px;font-weight:600}
+.card .meta{font-size:12px;color:var(--mut);margin-bottom:8px}
+.card p{margin:6px 0;font-size:13px}
+.tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;
+  margin-right:6px;margin-bottom:4px}
+.t-eng{background:rgba(88,166,255,.15);color:var(--eng);border:1px solid rgba(88,166,255,.3)}
+.t-tune{background:rgba(210,168,255,.15);color:var(--tune);border:1px solid rgba(210,168,255,.3)}
+.t-po{background:rgba(255,123,114,.15);color:var(--po);border:1px solid rgba(255,123,114,.3)}
+.t-qa{background:rgba(240,136,62,.15);color:var(--qa);border:1px solid rgba(240,136,62,.3)}
+.t-media{background:rgba(165,214,255,.15);color:var(--media)}
+.t-skill{background:rgba(121,192,255,.15);color:var(--skill)}
+.owns{background:var(--panel2);border-radius:6px;padding:8px 10px;margin-top:8px;font-size:12px}
+.owns b{color:var(--accent)}
+.flow{background:var(--panel2);border:1px solid var(--border);border-radius:10px;
+  padding:18px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;
+  white-space:pre;overflow-x:auto;line-height:1.55}
+.flow .e{color:var(--eng)}
+.flow .t{color:var(--tune)}
+.flow .m{color:var(--accent)}
+.flow .d{color:var(--mut)}
+.flow .ok{color:var(--ok)}
+.legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;font-size:12px;color:var(--mut)}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle}
+.skill-row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px}
+.skill-row:last-child{border-bottom:none}
+.skill-row code{background:var(--panel2);padding:1px 6px;border-radius:4px;color:var(--skill);font-size:12px}
+table{width:100%;border-collapse:collapse}
+table th,table td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border);font-size:13px}
+table th{color:var(--mut);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.05em}
+table code{background:var(--panel2);padding:1px 6px;border-radius:4px;font-size:12px}
+.muted{color:var(--mut);font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Compia — структура продукта и агенты</h1>
+<div class="sub">Снимок на 3 июня 2026. Telegram-бот-компаньон. Один Python-процесс, SQLite, Anthropic + fal.ai.</div>
+
+<!-- ============ АГЕНТЫ ============ -->
+<h2>Sub-агенты в проекте (.claude/agents/)</h2>
+<div class="muted" style="margin-bottom:14px">Четыре специализированных Claude-агента с разделёнными зонами ответственности. Главный Claude делегирует им работу через Agent tool.</div>
+
+<div class="grid g2">
+
+  <div class="card">
+    <h4><span class="tag t-eng">bot-engineer</span></h4>
+    <div class="meta">Tools: Read, Edit, Write, Bash, Grep, Glob, WebSearch, WebFetch</div>
+    <p>Пишет Python-код: handlers, миграции, fal-обёртки, async-в-потоке.</p>
+    <div class="owns"><b>Владеет:</b> bot.py, ai.py, database.py, imagegen.py, videogen.py, personas.py, config.py</div>
+    <div class="owns" style="background:rgba(255,123,114,.05)"><b>НЕ трогает:</b> personas/*.txt (это persona-prompt-tuner)</div>
+  </div>
+
+  <div class="card">
+    <h4><span class="tag t-tune">persona-prompt-tuner</span></h4>
+    <div class="meta">Tools: Read, Edit, Write, Bash, Grep, Glob</div>
+    <p>Редактирует system-промпты персон и динамические блоки. Хранит ban-list LLM-bypass паттернов.</p>
+    <div class="owns"><b>Владеет:</b> personas/{common,onboarding,friend,coach,mira}.txt, _build_mira_*_block, _language_directive, transition block в ai.py</div>
+    <div class="owns" style="background:rgba(255,123,114,.05)"><b>НЕ трогает:</b> handlers, DB, fal calls (это bot-engineer)</div>
+  </div>
+
+  <div class="card">
+    <h4><span class="tag t-po">product-owner</span></h4>
+    <div class="meta">Tools: Read, Grep, Glob, WebSearch, WebFetch, Bash</div>
+    <p>Стратегия, UX-критика, приоритизация, монетизация. Защищает продуктовые принципы. <b>Read-only.</b></p>
+    <div class="owns"><b>Принципы:</b> IKEA-эффект, no internals leakage, sunk-cost retention. Возвращает crisp рекомендации с tradeoffs.</div>
+    <div class="owns" style="background:rgba(255,123,114,.05)"><b>НЕ:</b> код, коммиты — только мнение.</div>
+  </div>
+
+  <div class="card">
+    <h4><span class="tag t-qa">qa-reviewer</span></h4>
+    <div class="meta">Tools: Read, Grep, Glob, Bash</div>
+    <p>Проверяет транскрипты/скриншоты диалогов и code diff'ы против накопленного ban-list. <b>Read-only.</b></p>
+    <div class="owns"><b>Ловит:</b> async-promises, system-internals, gatekeeping, role-bleed, Mira-name spoilers, конкуренты, language drift.</div>
+    <div class="owns" style="background:rgba(255,123,114,.05)"><b>НЕ:</b> чинит — только флагает с severity, цитатой и fix-owner.</div>
+  </div>
+
+</div>
+
+<!-- ============ SKILLS ============ -->
+<h2>Skills (доступны через slash-commands и Skill tool)</h2>
+<div class="muted" style="margin-bottom:14px">Встроенные в Claude Code Web возможности. В этой сессии активны:</div>
+
+<div class="grid g2">
+  <div class="card">
+    <h4>Workflow / dev-loop</h4>
+    <div class="skill-row"><span><code>/verify</code></span><span class="muted">Запустить приложение и проверить руками</span></div>
+    <div class="skill-row"><span><code>/run</code></span><span class="muted">Поднять процесс, чтобы увидеть изменения</span></div>
+    <div class="skill-row"><span><code>/code-review</code></span><span class="muted">Просканировать diff на баги</span></div>
+    <div class="skill-row"><span><code>/simplify</code></span><span class="muted">Найти упрощения и применить</span></div>
+    <div class="skill-row"><span><code>/security-review</code></span><span class="muted">Security-аудит изменений</span></div>
+    <div class="skill-row"><span><code>/review</code></span><span class="muted">Ревью pull request'а</span></div>
+  </div>
+  <div class="card">
+    <h4>Research / config / прочее</h4>
+    <div class="skill-row"><span><code>/deep-research</code></span><span class="muted">Fan-out поиск + cited репорт</span></div>
+    <div class="skill-row"><span><code>/claude-api</code></span><span class="muted">Тюнить Anthropic SDK код</span></div>
+    <div class="skill-row"><span><code>/update-config</code></span><span class="muted">Настройки settings.json, hooks</span></div>
+    <div class="skill-row"><span><code>/keybindings-help</code></span><span class="muted">Кастомные шорткаты</span></div>
+    <div class="skill-row"><span><code>/loop</code></span><span class="muted">Запустить промпт по интервалу</span></div>
+    <div class="skill-row"><span><code>/fewer-permission-prompts</code></span><span class="muted">Allowlist частых Bash в .claude/settings</span></div>
+    <div class="skill-row"><span><code>/session-start-hook</code></span><span class="muted">Hook на старте сессии</span></div>
+    <div class="skill-row"><span><code>/init</code></span><span class="muted">Сгенерить CLAUDE.md</span></div>
+  </div>
+</div>
+
+<!-- ============ КОД ============ -->
+<h2>Структура кода</h2>
+
+<div class="grid g3">
+
+  <div class="card">
+    <h4>bot.py <span class="muted" style="font-weight:400">— 86 KB</span></h4>
+    <div class="meta">Точка входа, aiogram 3 handlers</div>
+    <p>handle_message, handle_start, handle_persona, handle_checkins, handle_newlook. Callback'и гейта 18+, выбора персоны. _generate_and_send_base/photo/circle/talking. checkin_loop.</p>
+  </div>
+
+  <div class="card">
+    <h4>ai.py <span class="muted" style="font-weight:400">— 38 KB</span></h4>
+    <div class="meta">Все вызовы Anthropic</div>
+    <p>get_reply (Sonnet 4.6), generate_checkin, build_image_prompt, build_edit_instruction, build_video_motion, generate_spoken_line, update_memory, detect_need, detect_media_request, detect_nickname_action, screen_appearance_description.</p>
+  </div>
+
+  <div class="card">
+    <h4>database.py <span class="muted" style="font-weight:400">— 28 KB</span></h4>
+    <div class="meta">SQLite, идемпотентные миграции</div>
+    <p>users, messages, user_facts. Хелперы для Миры (look, name_state, real_name, base_photo_msg, pinned_msg, activated_at, adult_*). get_due_checkin_users, last_seen / last_checkin_at.</p>
+  </div>
+
+  <div class="card">
+    <h4>personas.py + personas/*.txt</h4>
+    <div class="meta">Реестр персон + prompt caching</div>
+    <p>build_system_blocks: common.txt → onboarding/friend/coach/mira.txt → dynamic blocks. 5 текстовых промптов, ban-list в common.txt.</p>
+  </div>
+
+  <div class="card">
+    <h4>imagegen.py / videogen.py</h4>
+    <div class="meta">fal.ai обёртки</div>
+    <p>Flux Dev (base portrait), Nano Banana edit (фото по запросу), Kling 2.1 i2v (тихий кружок), ElevenLabs multilingual-v2 TTS + VEED Fabric (говорящий кружок). Lazy import fal_client.</p>
+  </div>
+
+  <div class="card">
+    <h4>config.py</h4>
+    <div class="meta">Настройки и ключи</div>
+    <p>TELEGRAM_TOKEN, ANTHROPIC_API_KEY, FAL_KEY. MODEL=claude-sonnet-4-6, SUMMARY_MODEL=claude-haiku-4-5. Модели fal, лимиты, COMPIA_TEST_MODE.</p>
+  </div>
+
+</div>
+
+<!-- ============ ТЕСТЕР ============ -->
+<h2>tester/ — E2E AI-симулятор</h2>
+<div class="muted" style="margin-bottom:14px">Claude играет юзера → реальный код бота отвечает → Claude-judge ловит регрессии.</div>
+
+<table>
+<tr><th>Файл</th><th>Что делает</th></tr>
+<tr><td><code>simulator.py</code></td><td>Драйвер: user-LLM по профилю + вызов process_user_message + сбор bubbles/media/actions</td></tr>
+<tr><td><code>profiles.py</code></td><td>Пресеты юзеров (lonely_romantic_uk и др.)</td></tr>
+<tr><td><code>scenarios.py</code></td><td>Сценарии с milestones и checks (onboarding_to_mira_photo и др.)</td></tr>
+<tr><td><code>judge.py</code></td><td>Sonnet-судья проверяет транскрипт против ban-list, возвращает {findings, milestones}</td></tr>
+<tr><td><code>relationship_arc.py</code></td><td>Тест 3-фазной дуги (стадии отношений Миры)</td></tr>
+<tr><td><code>arc_bio.py</code></td><td>Биография юзера для arc-теста</td></tr>
+<tr><td><code>arc_analyzer.py</code></td><td>Анализ результата arc-теста</td></tr>
+<tr><td><code>arc_dashboard.py</code></td><td>HTML-дашборд по arc-результатам</td></tr>
+<tr><td><code>product_dashboard.py</code></td><td>HTML-дашборд с продуктовыми метриками</td></tr>
+<tr><td><code>cost.py</code></td><td>Monkey-patch Messages.create для трекинга токенов и $</td></tr>
+<tr><td><code>checkin_dry_run.py</code></td><td>Dry-run проактивного сообщения (без отправки в TG)</td></tr>
+<tr><td><code>checkin_send_once.py</code></td><td>Один проход checkin-цикла с реальной отправкой</td></tr>
+<tr><td><code>harness.py</code></td><td>Тестовая обвязка</td></tr>
+</table>
+
+<!-- ============ FLOW ============ -->
+<h2>Flow: сообщение → ответ</h2>
+
+<div class="flow"><span class="d">┌─────────────────────────────────────────────────────────────────┐</span>
+<span class="d">│</span> юзер пишет в Telegram <span class="d">                                          │</span>
+<span class="d">└────────────────────────────┬────────────────────────────────────┘</span>
+                             ▼
+            <span class="m">handle_message</span> (bot.py)
+                             │
+                             ├─ <span class="ok">скип service msg</span> (pin/unpin/new_member) — return
+                             ├─ скачать фото если есть
+                             ├─ db.add_message(user) + touch_last_seen
+                             ├─ db.get_persona / get_history / get_facts
+                             │
+                             │  <span class="d">┌─ онбординг ≥ N сообщений → detect_need</span>
+                             │  <span class="d">│  ├─ romantic + 18+ → set Mira</span>
+                             │  <span class="d">│  ├─ romantic + не 18+ → gate_after_reply=True</span>
+                             │  <span class="d">│  └─ friend / coach → set persona</span>
+                             │
+                             ├─ <span class="m">try_handle_mira_media</span> (если mira)
+                             │  ├─ awaiting_description → _generate_and_send_base
+                             │  │   └─ db.set_mira_base_photo_msg(msg_id)  <span class="ok">(пин потом)</span>
+                             │  ├─ detect_media_request → photo / video / talking
+                             │  └─ return если медиа обслужено
+                             │
+                             ├─ собрать extra_system blocks:
+                             │  ├─ _language_directive(lang)
+                             │  ├─ _build_mira_name_block (если mira)
+                             │  └─ _build_mira_stage_block (если mira)
+                             │
+                             ├─ <span class="t">ai.get_reply</span>(persona, history, facts, extra_system)
+                             │   └─ Sonnet 4.6 + prompt caching (build_system_blocks)
+                             │
+                             ├─ db.add_message(assistant) + send_bubbles
+                             │
+                             ├─ <span class="ok">6.4) если last_bot=base_caption + positive_reaction:</span>
+                             │  └─ pin_chat_message(mira_base_photo_msg_id) + db.set_mira_pinned_msg
+                             │
+                             ├─ gate_after_reply → отправить гейт 18+
+                             │
+                             └─ каждое N-е сообщение → ai.update_memory (Haiku 4.5)
+</div>
+
+<!-- ============ ПЕРСОНЫ ============ -->
+<h2>Персоны</h2>
+
+<div class="grid g4">
+  <div class="card"><h4>onboarding</h4><p>Хост-нейтрал, мягко определяет потребность (friend/coach/romantic).</p></div>
+  <div class="card"><h4>friend</h4><p>Тёплый ровесник, без советов сверху. На «познакомь меня» — факт «через /persona», без gatekeeping.</p></div>
+  <div class="card"><h4>coach</h4><p>Структура и ясность. Не «я и есть коуч».</p></div>
+  <div class="card"><h4>mira</h4><p>Девушка-компаньон. Имя не существует пока не спросят. Стадии отношений, фото, кружочки, голос. /newlook для смены образа.</p></div>
+</div>
+
+<h3 style="margin-top:18px">common.txt — общий слой</h3>
+<div class="card">
+<p>Ban-list (постоянно расширяется): подожди / зачекай, дальше будет интереснее, я и есть та девушка, описания качеств других персон, имя Миры в первом сообщении, дорослий контент / 18+ / персона / бот / модель, Tinder / Bumble / dating apps, перерисовываешь / нарисовали / генерируешь меня, сравнение нового образа со старым.</p>
+</div>
+
+<!-- ============ ВНЕШНИЕ ============ -->
+<h2>Внешние сервисы</h2>
+<div class="grid g4">
+  <div class="card"><h4>Anthropic</h4><p><b>claude-sonnet-4-6</b> — все реплики персон, чек-ины, генерация промптов.<br><b>claude-haiku-4-5</b> — классификаторы (need/media/nickname), долговременная память.</p></div>
+  <div class="card"><h4>fal.ai</h4><p>flux/dev — базовый портрет.<br>nano-banana/edit — фото с референсом.<br>kling 2.1 i2v — тихий кружок.<br>VEED Fabric — липсинк говорящего кружка.</p></div>
+  <div class="card"><h4>ElevenLabs</h4><p>multilingual-v2 TTS для голоса.</p></div>
+  <div class="card"><h4>Telegram</h4><p>aiogram 3.4+. Long polling. pin/unpin для базового фото.</p></div>
+</div>
+
+<h2 style="margin-top:42px">Команды бота для юзера</h2>
+<div class="card">
+<div class="skill-row"><code>/start</code><span class="muted">Начать или сбросить</span></div>
+<div class="skill-row"><code>/persona</code><span class="muted">Сменить кто рядом</span></div>
+<div class="skill-row"><code>/newlook</code><span class="muted">Сменить образ Миры (открепить старый пин, попросить описать)</span></div>
+<div class="skill-row"><code>/checkins</code><span class="muted">Как часто я пишу первой</span></div>
+</div>
+
+<div class="muted" style="margin-top:32px;text-align:center">
+Compia · ветка claude/focused-keller-FxIM2 · последний коммит 3b56792
+</div>
+
+</div>
+</body>
+</html>
