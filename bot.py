@@ -500,23 +500,38 @@ async def handle_start(message: Message):
 @dp.message(Command("persona"))
 async def handle_persona(message: Message):
     """Показать кнопки выбора персоны. Текущая персона не показывается."""
-    current = database.get_persona(message.from_user.id)
-    await message.answer(
-        "Кого тобі хочеться поруч зараз? Обрати можна будь-коли.",
-        reply_markup=persona_keyboard(exclude=current),
+    user_id = message.from_user.id
+    current = database.get_persona(user_id)
+    history = database.get_history(user_id, HISTORY_LIMIT)
+    lang = _detect_user_language(history)
+    text = (
+        "Кого тобі хочеться поруч зараз? Обрати можна будь-коли."
+        if lang == "uk"
+        else "Кого тебе хочется рядом сейчас? Выбрать можно когда угодно."
     )
+    await message.answer(text, reply_markup=persona_keyboard(exclude=current))
 
 
 @dp.message(Command("checkins"))
 async def handle_checkins(message: Message):
     """Настройка частоты проактивных сообщений («бот пишет первым»)."""
-    current = database.get_checkin_freq(message.from_user.id)
-    await message.answer(
-        "Я можу інколи писати тобі першим, по-доброму, коли тебе давно не було.\n"
-        f"Зараз: {CHECKIN_LABELS.get(current, current)}. "
-        "Обери, як часто. Вимкнути можна будь-коли.",
-        reply_markup=checkin_keyboard(),
-    )
+    user_id = message.from_user.id
+    current = database.get_checkin_freq(user_id)
+    history = database.get_history(user_id, HISTORY_LIMIT)
+    lang = _detect_user_language(history)
+    if lang == "uk":
+        text = (
+            "Я можу інколи писати тобі першим, по-доброму, коли тебе давно не було.\n"
+            f"Зараз: {CHECKIN_LABELS.get(current, current)}. "
+            "Обери, як часто. Вимкнути можна будь-коли."
+        )
+    else:
+        text = (
+            "Я могу иногда писать тебе первым, по-доброму, когда тебя давно не было.\n"
+            f"Сейчас: {CHECKIN_LABELS.get(current, current)}. "
+            "Выбери, как часто. Выключить можно когда угодно."
+        )
+    await message.answer(text, reply_markup=checkin_keyboard())
 
 
 @dp.message(Command("newlook"))
@@ -840,6 +855,17 @@ _RU_WORD_MARKERS = (
     " тоже ", " чуть", " слышу", " слышал",
     " рад ", " рада ", " рад,", " рада,", "рад твое", "рад твоей",
     "пишу", "люблю",
+    # Дополнительно: характерные русские слова (только те, что отличаются от
+    # украинского, чтобы не получалось взаимной нейтрализации).
+    " твой ", " твоё ", " твои ",
+    " мой ", " моё ", " мои ",
+    " этот ", " эта ", " это ", " эти ",
+    " только ", " сейчас ", " сегодня ", " вчера ",
+    " русая", " глаза", " грудь", " подчерк",
+    " вижу ", " видела", " представ", " подразум",
+    "вообще", "наверн",
+    "спасибо",
+    "нравишь", "нравит", "нравлюсь",
 )
 _UK_WORD_MARKERS = (
     " що ", " що,", " що.", " що?", " що!",
@@ -850,6 +876,15 @@ _UK_WORD_MARKERS = (
     " також", " теж ", " треба", " чую", " чув",
     " радий ", " рада ", " радий,", "радий твоє",
     " пишу", " кохаю", " люблю",
+    # Дополнительно: характерные украинские слова (только эксклюзивные).
+    " твій ", " твоє ", " твої ",
+    " мій ", " моє ", " мої ",
+    " як ", "як?",
+    " цей ", " ця ", " ці ",
+    " тільки ", " зараз ", " сьогодні ", " вчора ",
+    " бачу ", " бачила", " бачив",
+    "будь ласка", "дякую",
+    "подобаюсь", "подобаєш", "подобаєт",
 )
 
 
@@ -902,14 +937,18 @@ def _detect_user_language(history):
     if any(k in last for k in uk_keywords):
         return "uk"
 
-    # 2) Балльная детекция последней реплики юзера.
-    ru, uk = _score_lang(last)
+    # 2) Балльная детекция последней реплики юзера. Считаем СУММУ последних
+    # двух user-реплик (последняя может быть короткой типа «угу» - тогда
+    # предыдущая даст контекст). Это сильнее перекрывает старый диалог
+    # на другом языке.
+    last_two_user = " ".join(user_msgs[-2:])
+    ru, uk = _score_lang(last_two_user)
     if ru > uk:
         return "ru"
     if uk > ru:
         return "uk"
 
-    # 3) Если последняя реплика нейтральная - смотрим, на каком языке
+    # 3) Если последние реплики юзера нейтральные - смотрим, на каком языке
     # сама Мира отвечала в прошлый раз. Это самый надёжный сигнал
     # «текущего языка диалога».
     if bot_msgs:
@@ -919,8 +958,9 @@ def _detect_user_language(history):
         if uk_b > ru_b:
             return "uk"
 
-    # 4) Фолбэк на 6 последних user-сообщений.
-    recent = " ".join(user_msgs[-6:])
+    # 4) Фолбэк на 4 последних user-сообщений (узкое окно, чтобы старая
+    # история на другом языке не перебивала текущий язык диалога).
+    recent = " ".join(user_msgs[-4:])
     ru_r, uk_r = _score_lang(recent)
     if ru_r > uk_r:
         return "ru"
@@ -1063,6 +1103,8 @@ async def _generate_and_send_base(message, user_id, description, lang):
     sent = await message.answer_photo(FSInputFile(path), caption=caption)
     # Закрепляем базовое фото в чате - чтобы человек видел «кого ты завёл»
     # при возврате в диалог. При /newlook старый пин заменим на новый.
+    # В ЛС с ботом TG разрешает пин без прав админа, но иногда возвращает
+    # «not enough rights» - логируем явно, чтобы было видно причину.
     try:
         await bot.pin_chat_message(
             chat_id=message.chat.id,
@@ -1070,8 +1112,15 @@ async def _generate_and_send_base(message, user_id, description, lang):
             disable_notification=True,
         )
         database.set_mira_pinned_msg(user_id, sent.message_id)
-    except Exception:
-        logging.exception("Не удалось закрепить базовое фото user_id=%s", user_id)
+        logging.info(
+            "Закрепили базовое фото user_id=%s msg_id=%s",
+            user_id, sent.message_id,
+        )
+    except Exception as e:
+        logging.warning(
+            "Не удалось закрепить базовое фото user_id=%s: %s: %s",
+            user_id, type(e).__name__, e,
+        )
 
 
 async def _generate_and_send_photo(message, user_id, look, request_text, lang):
@@ -1379,10 +1428,12 @@ async def handle_message(message: Message):
 
     # 6.4) После первого базового фото и позитивной реакции - один раз
     #      подсказываем поставить это фото как кастомное «фото контакта».
+    #      Условие не зависит от пина: если он сломался по правам, инвайт
+    #      всё равно должен прилететь.
     if (
         persona_key == "mira"
         and not database.is_avatar_invite_sent(user_id)
-        and database.get_mira_pinned_msg(user_id) is not None
+        and database.get_mira_look(user_id)["base_path"] is not None
         and _last_bot_was_base_photo(history)
         and _is_positive_reaction(user_text)
     ):
@@ -1390,6 +1441,7 @@ async def handle_message(message: Message):
         database.add_message(user_id, "assistant", invite_text)
         await message.answer(invite_text)
         database.mark_avatar_invite_sent(user_id)
+        logging.info("Отправили avatar-invite user_id=%s lang=%s", user_id, lang)
 
     # 6.5) Если онбординг готов передать человека к Мире через гейт - шлём гейт
     #      сразу после финальной реплики хоста (никакого ожидания «минутку»).
