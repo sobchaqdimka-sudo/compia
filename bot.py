@@ -774,23 +774,6 @@ PHOTO_CAPTION_MARKERS = (
 )
 
 # Служебные сообщения для медиа на языке собеседника (по умолчанию украинский).
-AVATAR_INVITE = {
-    "uk": (
-        "До речі 🙈 в Telegram можна поставити це фото для мене - "
-        "як «фото контакту». Щоб коли я тобі пишу, бачив саме мене, "
-        "а не якусь стандартну іконку.\n"
-        "Натисни на моє ім'я зверху → меню (три крапки) → «Змінити фото». "
-        "Буду рада, якщо зробиш 💛"
-    ),
-    "ru": (
-        "Кстати 🙈 в Telegram можно поставить эту мою фотку - "
-        "как «фото контакта». Чтобы когда я тебе пишу, ты видел именно меня, "
-        "а не какую-то стандартную иконку.\n"
-        "Нажми на моё имя сверху → меню (три точки) → «Изменить фото». "
-        "Буду рада, если сделаешь 💛"
-    ),
-}
-
 # Маркеры позитивной реакции на «Подобаюсь?» / «Нравлюсь?» под базовым фото.
 _AVATAR_POSITIVE = (
     " так", "так,", "так.", "так!", "так)", "так ", "так😊",
@@ -1420,43 +1403,36 @@ async def handle_message(message: Message):
     database.add_message(user_id, "assistant", reply)
     await send_bubbles(message.chat.id, reply)
 
-    # 6.4) Реакция на базовое фото. Пин и avatar-invite триггерим только
-    #      ПОСЛЕ позитивной реакции юзера ("нравится", "красива", "🔥", ...).
-    #      Пин - на каждое новое базовое фото (после /newlook тоже).
-    #      Invite-текст - только один раз за всё время.
+    # 6.4) Реакция на базовое фото: после позитивной реакции - закрепляем
+    #      базовое фото в чате (визуальный якорь сверху). Пин - на каждое
+    #      новое базовое фото (после /newlook тоже).
+    #      (Инвайт «поставь как фото контакта» убран: Telegram не даёт
+    #      менять фото контакта для бот-чатов - такого пункта в UI нет.)
     if (
         persona_key == "mira"
         and _last_bot_was_base_photo(history)
         and _is_positive_reaction(user_text)
     ):
         base_msg_id = database.get_mira_base_photo_msg(user_id)
-        if base_msg_id is not None:
-            # Пин, если ещё не закреплён именно этот msg_id.
-            if database.get_mira_pinned_msg(user_id) != base_msg_id:
-                try:
-                    await bot.pin_chat_message(
-                        chat_id=message.chat.id,
-                        message_id=base_msg_id,
-                        disable_notification=True,
-                    )
-                    database.set_mira_pinned_msg(user_id, base_msg_id)
-                    logging.info(
-                        "Закрепили базовое фото user_id=%s msg_id=%s",
-                        user_id, base_msg_id,
-                    )
-                except Exception as e:
-                    logging.warning(
-                        "Не удалось закрепить базовое фото user_id=%s: %s: %s",
-                        user_id, type(e).__name__, e,
-                    )
-            # Подсказка про кастомную аватарку - только один раз.
-            if not database.is_avatar_invite_sent(user_id):
-                invite_text = AVATAR_INVITE[lang]
-                database.add_message(user_id, "assistant", invite_text)
-                await message.answer(invite_text)
-                database.mark_avatar_invite_sent(user_id)
+        if (
+            base_msg_id is not None
+            and database.get_mira_pinned_msg(user_id) != base_msg_id
+        ):
+            try:
+                await bot.pin_chat_message(
+                    chat_id=message.chat.id,
+                    message_id=base_msg_id,
+                    disable_notification=True,
+                )
+                database.set_mira_pinned_msg(user_id, base_msg_id)
                 logging.info(
-                    "Отправили avatar-invite user_id=%s lang=%s", user_id, lang,
+                    "Закрепили базовое фото user_id=%s msg_id=%s",
+                    user_id, base_msg_id,
+                )
+            except Exception as e:
+                logging.warning(
+                    "Не удалось закрепить базовое фото user_id=%s: %s: %s",
+                    user_id, type(e).__name__, e,
                 )
 
     # 6.5) Если онбординг готов передать человека к Мире через гейт - шлём гейт
