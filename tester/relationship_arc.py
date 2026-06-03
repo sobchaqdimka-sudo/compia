@@ -26,6 +26,7 @@ from typing import List
 import anthropic
 
 from .arc_bio import ANDRIY_SYSTEM, USER_BIO, BIO_HOOKS
+from .cost import install_tracker, reset as reset_cost, summary as cost_summary
 from .harness import Event, FakeMessage, install, restore
 from .simulator import (
     TEST_UID, _bot_visible_events, _events_to_user_lines,
@@ -130,6 +131,8 @@ async def run_arc(keep_db: bool = False) -> dict:
     LOG.info("RELATIONSHIP ARC: Андрій × Мира")
     LOG.info("=" * 60)
 
+    install_tracker()
+    reset_cost()
     _setup_isolated_db()
     import bot as bot_module
     import database
@@ -188,14 +191,28 @@ async def run_arc(keep_db: bool = False) -> dict:
         restore(original_bot)
 
     elapsed = time.time() - started_at
-    LOG.info("Дуга прогнана за %.1fs", elapsed)
+    cost = cost_summary()
+    LOG.info(
+        "Дуга прогнана за %.1fs, виклики=%d, токени in/out=%d/%d, $%.4f",
+        elapsed,
+        cost["totals"]["calls"], cost["totals"]["input"],
+        cost["totals"]["output"], cost["totals"]["cost_usd"],
+    )
 
+    user_msg_count = sum(1 for t in turns_all if t["role"] == "user")
+    bot_msg_count = sum(1 for t in turns_all if t["role"] == "bot")
     result = {
         "bio": USER_BIO,
         "phase_segments": {str(k): v for k, v in phase_segments.items()},
         "all_turns": turns_all,
         "elapsed_sec": round(elapsed, 1),
         "generated_at": datetime.utcnow().isoformat() + "Z",
+        "cost": cost,
+        "message_counts": {
+            "user": user_msg_count,
+            "bot": bot_msg_count,
+            "total": user_msg_count + bot_msg_count,
+        },
     }
 
     _teardown_isolated_db(keep_db)

@@ -327,6 +327,62 @@ li { margin: 4px 0; }
 """
 
 
+def _cost_block(cost: dict, message_counts: dict) -> str:
+    if not cost:
+        return ""
+    totals = cost.get("totals", {})
+    per_model = cost.get("per_model", {}) or {}
+    total_msgs = message_counts.get("total", 0)
+    user_msgs = message_counts.get("user", 0)
+    bot_msgs = message_counts.get("bot", 0)
+    total_cost = totals.get("cost_usd", 0.0)
+    per_msg = (total_cost / total_msgs) if total_msgs else 0.0
+    per_bot = (total_cost / bot_msgs) if bot_msgs else 0.0
+
+    rows = []
+    for model, s in sorted(per_model.items(), key=lambda x: -x[1]["cost_usd"]):
+        rows.append(
+            f'<tr><td>{_esc(model)}</td>'
+            f'<td class="num">{s["calls"]}</td>'
+            f'<td class="num">{s["input"]:,}</td>'
+            f'<td class="num">{s["output"]:,}</td>'
+            f'<td class="num">{s["cache_read"]:,}</td>'
+            f'<td class="num">{s["cache_write"]:,}</td>'
+            f'<td class="num">${s["cost_usd"]:.4f}</td></tr>'
+        )
+
+    return f"""
+<div class="cross cost-block">
+  <h2>Вартість симуляції</h2>
+  <div class="cross-headline">
+    <div class="big-stat">
+      <div class="big-num">${total_cost:.4f}</div>
+      <div class="big-label">за весь прогон дуги</div>
+    </div>
+    <div class="big-stat">
+      <div class="big-num">{total_msgs}</div>
+      <div class="big-label">всього повідомлень ({user_msgs} user / {bot_msgs} bot)</div>
+    </div>
+    <div class="big-stat">
+      <div class="big-num">${per_msg*1000:.2f}<span style="font-size:14px">/1k</span></div>
+      <div class="big-label">≈ ${per_msg:.5f} за повідомлення<br>(${per_bot:.5f} за відповідь бота)</div>
+    </div>
+  </div>
+  <table class="cost-table">
+    <thead><tr>
+      <th>модель</th><th>виклики</th><th>input</th><th>output</th>
+      <th>cache read</th><th>cache write</th><th>$</th>
+    </tr></thead>
+    <tbody>{''.join(rows)}</tbody>
+  </table>
+  <p class="cost-note">
+    Ціни: Sonnet 4.6 — $3/$15 in/out, Haiku 4.5 — $1/$5 in/out, cache hit ~10% від input.
+    Symulator-LLM (Andriy через Haiku) і judge-LLM (Sonnet) теж враховані.
+  </p>
+</div>
+"""
+
+
 def render_dashboard(arc_result: dict, analysis: dict, out_path: str) -> str:
     """Сгенерить self-contained HTML файл и записать на диск."""
     bio = arc_result.get("bio", {})
@@ -334,6 +390,8 @@ def render_dashboard(arc_result: dict, analysis: dict, out_path: str) -> str:
     per_phase = analysis.get("per_phase", {})
     cross = analysis.get("cross_phase", {})
     labels = analysis.get("phase_labels", {1: "знайомство", 2: "зближення", 3: "своя"})
+    cost = arc_result.get("cost", {})
+    message_counts = arc_result.get("message_counts", {})
 
     phase_blocks = []
     for ph in (1, 2, 3):
@@ -341,12 +399,24 @@ def render_dashboard(arc_result: dict, analysis: dict, out_path: str) -> str:
         judged = per_phase.get(str(ph), {})
         phase_blocks.append(_phase_card(ph, labels.get(ph, str(ph)), segment, judged))
 
+    extra_css = """
+.cost-block { background: #fff8e1; }
+.cost-table { width: 100%; border-collapse: collapse; margin-top: 12px;
+              font-size: 13px; }
+.cost-table th, .cost-table td { padding: 6px 10px; text-align: left;
+                                  border-bottom: 1px solid #eee; }
+.cost-table th { background: #fdf3c4; font-weight: 600; }
+.cost-table td.num { text-align: right; font-family: ui-monospace,
+                      "SF Mono", Menlo, monospace; }
+.cost-note { font-size: 12px; color: #888; margin-top: 8px; }
+"""
+
     html = f"""<!doctype html>
 <html lang="uk">
 <head>
 <meta charset="utf-8">
 <title>Дуга стосунків: Мира × {_esc(bio.get('name','?'))}</title>
-<style>{CSS}</style>
+<style>{CSS}{extra_css}</style>
 </head>
 <body>
 <div class="container">
@@ -358,6 +428,8 @@ def render_dashboard(arc_result: dict, analysis: dict, out_path: str) -> str:
   </p>
 
   {_bio_card(bio)}
+
+  {_cost_block(cost, message_counts)}
 
   {_cross_block(cross)}
 
