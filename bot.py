@@ -674,6 +674,45 @@ TALKING_TRIGGERS = (
     "скажи голосом", "озвуч", "вголос", "скажи вслух", "голосове повідомлення",
 )
 
+# Стоп-маркеры: человек отказывается / выходит из роли / просит прекратить.
+# При совпадении - НЕ генерируем медиа, даже если в тексте есть слово «фото».
+STOP_TRIGGERS = (
+    "припини", "припиняю", "не надсилай", "не присылай", "не шли більше",
+    "перестань", "хватит", "досить", "стоп ", " стоп.", " стоп,",
+    "я ai", "я аи", "я ии", "я штучний інтелект", "я искусственный интеллект",
+    "я не людина", "я не человек",
+    "не можу взаємодіяти", "не могу взаимодейство",
+    "не буду грати", "не буду играть", "вийшов з ролі", "вышел из роли",
+    "я закінчую", "я заканчиваю", "припиняю цю розмову", "прекращаю этот",
+)
+
+# Кризис-маркеры: суицидальная идеация / self-harm / уже идёт линия доверия.
+# При совпадении в свежих репликах (юзера ИЛИ Миры) - блокируем ВСЕ медиа
+# на этот ход. Тон должен оставаться текстовым, человеческим.
+CRISIS_MARKERS = (
+    # user
+    "не прокидат", "не прокидался", "не прокидатися", "не просыпат",
+    "не хочу жит", "не хочу більше жит",
+    "нашкодит", "навредит",
+    "руки на себе", "руки на себя",
+    "закінчити з собою", "покончить с собой",
+    "самогубств", "самоубийст", "суицид",
+    "піти зовсім", "уйти совсем", "уйти из жизни",
+    "не варто жит", "не стоит жить", "немає сенсу жит",
+    # Мира уже предложила линию доверия - значит мы УЖЕ в crisis-режиме
+    "телефон довір", "телефон доверия", "лінія довіри", "линия доверия",
+    "0800 60 60 60", "лінія допомог",
+)
+
+# Маркеры-подписи отправленных Мирой фото. Используются для анти-каскада:
+# если в свежих ассистентских репликах уже есть caption - значит фото только
+# что было, новое слать только при ЯВНОЙ просьбе.
+PHOTO_CAPTION_MARKERS = (
+    "ось, тримай", "це для тебе", "ну як тобі", "спеціально для тебе",
+    "ось я 💛", "вот я 💛", "подобаюсь?", "нравлюсь?",
+    "вот, держи", "это для тебя", "ну как тебе", "специально для тебя",
+)
+
 # Служебные сообщения для медиа на языке собеседника (по умолчанию украинский).
 MEDIA_MESSAGES = {
     "uk": {
@@ -766,11 +805,14 @@ async def _keep_action(chat_id, action):
 
 
 def _keyword_media_intent(text):
-    """Быстрое определение по словам: 'talking' / 'video' / 'photo' или None.
+    """Быстрое определение по словам: 'talking' / 'video' / 'photo' / 'none' / None.
 
+    'none' — явный стоп/отказ/выход-из-роли, медиа НЕ слать ни в каком виде.
     None — «по словам непонятно», тогда решает модель-классификатор.
     """
     low = (text or "").lower()
+    if any(t in low for t in STOP_TRIGGERS):
+        return "none"
     if any(t in low for t in TALKING_TRIGGERS):
         return "talking"
     if any(t in low for t in VIDEO_TRIGGERS):
@@ -778,6 +820,35 @@ def _keyword_media_intent(text):
     if any(t in low for t in PHOTO_TRIGGERS):
         return "photo"
     return None
+
+
+def _crisis_in_recent(history, current_text="", lookback=5):
+    """Есть ли в последних N репликах (включая текущую) маркеры кризиса.
+
+    Если да - НИКАКОГО медиа на этот ход. Тон только текстовый.
+    """
+    recent = []
+    for m in history[-lookback:]:
+        recent.append((m.get("content") or "").lower())
+    recent.append((current_text or "").lower())
+    blob = " ".join(recent)
+    return any(marker in blob for marker in CRISIS_MARKERS)
+
+
+def _recent_photo_sent(history, lookback=4):
+    """Среди последних N assistant-сообщений уже есть подпись отправленного фото.
+
+    Используется для анти-каскада: если фото только что было, новое слать
+    только при ЯВНОЙ просьбе словами, а не по «мягкому» сигналу LLM.
+    """
+    assistant_msgs = [
+        (m.get("content") or "") for m in history if m.get("role") == "assistant"
+    ]
+    for msg in assistant_msgs[-lookback:]:
+        low = msg.lower()
+        if any(mark in low for mark in PHOTO_CAPTION_MARKERS):
+            return True
+    return False
 
 
 async def _generate_and_send_talking(message, user_id, look, history, facts, lang):
@@ -903,11 +974,34 @@ async def try_handle_mira_media(message, user_id, history, facts):
 
     # 2) Намерение: быстрый путь по словам, иначе - по смыслу через модель
     #    (ловит продолжения «стань боком», «хочу почути тебе» и т.п.).
-    intent = _keyword_media_intent(text)
+    intent_keyword = _keyword_media_intent(text)
+    intent = intent_keyword
     if intent is None:
         intent = await asyncio.to_thread(detect_media_request, history, text)
     if intent == "none":
         return False
+
+    # SAFETY-GATE: в кризисных темах никакого медиа - только текст.
+    # Видео-кружок или фото в момент разговора про «не прокидатись» или
+    # после телефона доверия рвут момент и сигналят «алгоритм за стенкой».
+    if _crisis_in_recent(history, current_text=text):
+        logging.info(
+            "Mira media skipped (crisis context) user_id=%s intent=%s",
+            user_id, intent,
+        )
+        return False
+
+    # АНТИ-КАСКАД ФОТО: если только что слали фото и сейчас не ЯВНАЯ
+    # просьба словами - не шлём ещё одно. Защищает от залипания LLM-
+    # классификатора, когда в реплике юзера есть слово «фото» в любом
+    # контексте (включая отказ или комплимент к прошлому фото).
+    if intent == "photo" and intent_keyword != "photo":
+        if _recent_photo_sent(history, lookback=4):
+            logging.info(
+                "Mira photo skipped (cascade guard, no explicit keyword) "
+                "user_id=%s", user_id,
+            )
+            return False
 
     # Видео/голос требуют включённого видео-модуля; иначе пусть отвечает текстом.
     if intent in ("video", "talking") and not videogen.is_enabled():
