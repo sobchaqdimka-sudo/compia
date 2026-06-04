@@ -53,12 +53,20 @@ from config import (
     TEST_MODE,
 )
 
-# Подписи режимов проактивных сообщений (для кнопок и текста).
+# Подписи режимов проактивных сообщений (для кнопок и текста), по языку юзера.
 CHECKIN_LABELS = {
-    "off": "Вимкнено",
-    "rarely": "Рідко",
-    "sometimes": "Іноді",
-    "often": "Часто",
+    "uk": {
+        "off": "Вимкнено",
+        "rarely": "Рідко",
+        "sometimes": "Іноді",
+        "often": "Часто",
+    },
+    "ru": {
+        "off": "Выключено",
+        "rarely": "Редко",
+        "sometimes": "Иногда",
+        "often": "Часто",
+    },
 }
 
 # Простое логирование, чтобы видеть в консоли, что бот работает.
@@ -396,26 +404,40 @@ RESET_MESSAGES = {
     },
 }
 
-# Стартовое приветствие (всегда украинский — это первый контакт, истории ещё нет).
-START_WELCOME = (
-    "Привіт 🙂\n"
-    "Можемо так: одразу обереш, хто буде поруч - друг, коуч чи близька "
-    "дівчина. Або просто почнемо говорити, і я сам відчую, кого тобі зараз "
-    "хочеться."
-)
+# Стартовое приветствие. Если истории нет (первый контакт) - продуктовый
+# дефолт UK. Если есть (повторный /start или сброс с накопленной перепиской) -
+# по языку диалога.
+START_WELCOME = {
+    "uk": (
+        "Привіт 🙂\n"
+        "Можемо так: одразу обереш, хто буде поруч - друг, коуч чи близька "
+        "дівчина. Або просто почнемо говорити, і я сам відчую, кого тобі зараз "
+        "хочеться."
+    ),
+    "ru": (
+        "Привет 🙂\n"
+        "Можем так: сразу выберешь, кто будет рядом - друг, коуч или близкая "
+        "девушка. Или просто начнём говорить, и я сам почувствую, кого тебе "
+        "сейчас хочется."
+    ),
+}
 
 
-def checkin_keyboard():
-    """Кнопки выбора частоты проактивных сообщений."""
+def checkin_keyboard(lang="uk"):
+    """Кнопки выбора частоты проактивных сообщений на языке собеседника."""
+    labels = {
+        "uk": ("Вимкнути", "Рідко", "Іноді", "Часто"),
+        "ru": ("Выключить", "Редко", "Иногда", "Часто"),
+    }.get(lang, ("Вимкнути", "Рідко", "Іноді", "Часто"))
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Вимкнути", callback_data="checkin:off"),
-                InlineKeyboardButton(text="Рідко", callback_data="checkin:rarely"),
+                InlineKeyboardButton(text=labels[0], callback_data="checkin:off"),
+                InlineKeyboardButton(text=labels[1], callback_data="checkin:rarely"),
             ],
             [
-                InlineKeyboardButton(text="Іноді", callback_data="checkin:sometimes"),
-                InlineKeyboardButton(text="Часто", callback_data="checkin:often"),
+                InlineKeyboardButton(text=labels[2], callback_data="checkin:sometimes"),
+                InlineKeyboardButton(text=labels[3], callback_data="checkin:often"),
             ],
         ]
     )
@@ -517,8 +539,13 @@ async def handle_start(message: Message):
         return
 
     # Первый /start - создаём запись и здороваемся.
+    # Если у юзера уже была переписка без has_meaningful_state (теоретически:
+    # реплики есть, но «осмысленных выборов» нет) - определим язык по истории.
+    # Иначе - продуктовый дефолт UK.
     database.get_persona(user_id)
-    await message.answer(START_WELCOME, reply_markup=start_keyboard())
+    history = database.get_history(user_id, HISTORY_LIMIT)
+    lang = _detect_user_language(history) if history else "uk"
+    await message.answer(START_WELCOME[lang], reply_markup=start_keyboard())
 
 
 @dp.message(Command("persona"))
@@ -543,19 +570,20 @@ async def handle_checkins(message: Message):
     current = database.get_checkin_freq(user_id)
     history = database.get_history(user_id, HISTORY_LIMIT)
     lang = _detect_user_language(history)
+    label = CHECKIN_LABELS[lang].get(current, current)
     if lang == "uk":
         text = (
             "Я можу інколи писати тобі першим, по-доброму, коли тебе давно не було.\n"
-            f"Зараз: {CHECKIN_LABELS.get(current, current)}. "
+            f"Зараз: {label}. "
             "Обери, як часто. Вимкнути можна будь-коли."
         )
     else:
         text = (
             "Я могу иногда писать тебе первым, по-доброму, когда тебя давно не было.\n"
-            f"Сейчас: {CHECKIN_LABELS.get(current, current)}. "
+            f"Сейчас: {label}. "
             "Выбери, как часто. Выключить можно когда угодно."
         )
-    await message.answer(text, reply_markup=checkin_keyboard())
+    await message.answer(text, reply_markup=checkin_keyboard(lang))
 
 
 @dp.message(Command("newlook"))
@@ -590,15 +618,26 @@ async def handle_newlook(message: Message):
 async def on_start_choice(callback: CallbackQuery):
     """Выбор на старте: сразу выбрать персону или просто пообщаться."""
     choice = callback.data.split(":", 1)[1]
+    # Истории на этом этапе почти всегда нет (это первый клик после /start) -
+    # в таком случае оставляем продуктовый дефолт UK. Если переписка уже была
+    # (повторный /start без сброса) - подстраиваемся.
+    user_id = callback.from_user.id
+    history = database.get_history(user_id, HISTORY_LIMIT)
+    lang = _detect_user_language(history) if history else "uk"
     if choice == "choose":
-        await callback.message.answer(
-            "Добре. Кого тобі хочеться поруч?",
-            reply_markup=persona_keyboard(),
+        text = (
+            "Добре. Кого тобі хочеться поруч?"
+            if lang == "uk"
+            else "Хорошо. Кого тебе хочется рядом?"
         )
+        await callback.message.answer(text, reply_markup=persona_keyboard())
     else:  # chat — остаёмся в мягком онбординге
-        await callback.message.answer(
+        text = (
             "Чудово 🙂 Просто почни з чогось - як настрій, що в голові, якась дрібниця."
+            if lang == "uk"
+            else "Отлично 🙂 Просто начни с чего-нибудь - как настроение, что в голове, какая-нибудь мелочь."
         )
+        await callback.message.answer(text)
     await callback.answer()
 
 
@@ -635,9 +674,16 @@ async def on_persona_chosen(callback: CallbackQuery):
     if key == "mira":
         database.set_mira_activated_if_unset(user_id)
         _ensure_mira_real_name(user_id)
-    await callback.message.answer(
+    # Подтверждающее сообщение - на языке диалога. Истории к этому моменту
+    # может ещё не быть (пришёл от /persona в нулевом онбординге) - тогда UK.
+    history = database.get_history(user_id, HISTORY_LIMIT)
+    lang = _detect_user_language(history) if history else "uk"
+    confirm = (
         f"Готово, тепер поруч {info['name']}. Змінити завжди можна через /persona."
+        if lang == "uk"
+        else f"Готово, теперь рядом {info['name']}. Сменить всегда можно через /persona."
     )
+    await callback.message.answer(confirm)
     await send_persona_transition(callback.message, user_id, key)
     await callback.answer()
 
@@ -677,12 +723,17 @@ async def on_reset_choice(callback: CallbackQuery):
     user_id = callback.from_user.id
 
     if choice == "yes":
+        # Язык фиксируем ДО wipe — иначе после стирания истории детектор
+        # вернёт дефолтный UK и юзер, общавшийся по-русски, получит
+        # украинское приветствие.
+        history = database.get_history(user_id, HISTORY_LIMIT)
+        lang = _detect_user_language(history) if history else "uk"
         # Полностью стираем все данные пользователя и его медиа.
         database.wipe_user(user_id)
         shutil.rmtree(os.path.join(MEDIA_DIR, str(user_id)), ignore_errors=True)
         # Заново создаём «нового» юзера и здороваемся как в первый раз.
         database.get_persona(user_id)
-        await callback.message.answer(START_WELCOME, reply_markup=start_keyboard())
+        await callback.message.answer(START_WELCOME[lang], reply_markup=start_keyboard())
     else:
         history = database.get_history(user_id, HISTORY_LIMIT)
         lang = _detect_user_language(history)
@@ -694,13 +745,20 @@ async def on_reset_choice(callback: CallbackQuery):
 async def on_checkin_choice(callback: CallbackQuery):
     """Пользователь выбрал частоту проактивных сообщений."""
     freq = callback.data.split(":", 1)[1]
-    if freq not in CHECKIN_LABELS:
+    if freq not in CHECKIN_LABELS["uk"]:
         await callback.answer()
         return
-    database.set_checkin_freq(callback.from_user.id, freq)
-    await callback.message.answer(
-        f"Готово. Як часто я пишу першим: {CHECKIN_LABELS[freq]}."
+    user_id = callback.from_user.id
+    database.set_checkin_freq(user_id, freq)
+    history = database.get_history(user_id, HISTORY_LIMIT)
+    lang = _detect_user_language(history) if history else "uk"
+    label = CHECKIN_LABELS[lang][freq]
+    confirm = (
+        f"Готово. Як часто я пишу першим: {label}."
+        if lang == "uk"
+        else f"Готово. Как часто я пишу первой: {label}."
     )
+    await callback.message.answer(confirm)
     await callback.answer()
 
 
@@ -1241,13 +1299,22 @@ async def handle_message(message: Message):
         or getattr(message, "left_chat_member", None)
     ):
         return
-    # Принимаем текст и фото (с подписью или без); прочее (стикеры, голосовые)
-    # пока пропускаем.
-    if not message.text and not message.photo:
-        await message.answer("Поки що я розумію тільки текст і фото :)")
-        return
-
     user_id = message.from_user.id
+
+    # Принимаем текст и фото (с подписью или без); прочее (стикеры, голосовые)
+    # пока пропускаем. Текст «не понимаю» - на языке диалога, по существующей
+    # истории. Это сообщение НЕ должно попадать в историю, поэтому язык
+    # определяем по уже накопленной истории (если она есть).
+    if not message.text and not message.photo:
+        history_for_lang = database.get_history(user_id, HISTORY_LIMIT)
+        lang_unsupported = _detect_user_language(history_for_lang) if history_for_lang else "uk"
+        unsupported_text = (
+            "Поки що я розумію тільки текст і фото :)"
+            if lang_unsupported == "uk"
+            else "Пока что я понимаю только текст и фото :)"
+        )
+        await message.answer(unsupported_text)
+        return
 
     # Если пришло фото — скачиваем и готовим payload для модели; текст пользователя
     # формируем из caption либо ставим естественную «подсказку», без скобочных тегов.
@@ -1258,10 +1325,21 @@ async def handle_message(message: Message):
         except Exception:
             logging.exception("Не удалось скачать фото user_id=%s", user_id)
         caption = (message.caption or "").strip()
+        # Синтетический user-текст про фото - на языке диалога. Иначе он сам
+        # попадает в историю как UK-реплика и потом ломает _detect_user_language
+        # для русского юзера. Язык вычисляем по истории ДО этого добавления.
+        prior_history = database.get_history(user_id, HISTORY_LIMIT)
+        lang_photo = _detect_user_language(prior_history) if prior_history else "uk"
+        sent_phrase = "Я надіслав тобі фото." if lang_photo == "uk" else "Я отправил тебе фото."
+        missing_phrase = (
+            "Я надіслав тобі фото, але воно не дійшло."
+            if lang_photo == "uk"
+            else "Я отправил тебе фото, но оно не дошло."
+        )
         if image_payload:
-            user_text = "Я надіслав тобі фото." + (f" {caption}" if caption else "")
+            user_text = sent_phrase + (f" {caption}" if caption else "")
         else:
-            user_text = caption or "Я надіслав тобі фото, але воно не дійшло."
+            user_text = caption or missing_phrase
     else:
         user_text = message.text
 
@@ -1371,15 +1449,26 @@ async def handle_message(message: Message):
     if gate_after_reply:
         # Прямо сейчас это последняя реплика хоста перед системным гейтом.
         # Дать ОДНУ тёплую финальную фразу, без вопросов и без «подожди».
-        extra_parts.append(
-            "ЗАРАЗ це твоя ОСТАННЯ репліка в ролі хоста. Відразу після неї "
-            "система сама запропонує щось людині - нічого робити не потрібно. "
-            "Дай ОДНУ коротку тёплу фразу: просто покажи що ти почув і що "
-            "тобі з ним добре. БЕЗ питань. БЕЗ будь-яких натяків що щось "
-            "«станеться», «буде», «скоро», або що ти щось «починаєш розуміти» - "
-            "жодних підводок і обіцянок. Просто тепле живе завершення думки, "
-            "ніби природна пауза в розмові."
-        )
+        if lang == "ru":
+            extra_parts.append(
+                "СЕЙЧАС это твоя ПОСЛЕДНЯЯ реплика в роли хоста. Сразу после неё "
+                "система сама предложит кое-что человеку - ничего делать не нужно. "
+                "Дай ОДНУ короткую тёплую фразу: просто покажи, что ты услышал и "
+                "что тебе с ним хорошо. БЕЗ вопросов. БЕЗ любых намёков, что что-то "
+                "«случится», «будет», «скоро», или что ты что-то «начинаешь "
+                "понимать» - никаких подводок и обещаний. Просто тёплое живое "
+                "завершение мысли, как естественная пауза в разговоре."
+            )
+        else:
+            extra_parts.append(
+                "ЗАРАЗ це твоя ОСТАННЯ репліка в ролі хоста. Відразу після неї "
+                "система сама запропонує щось людині - нічого робити не потрібно. "
+                "Дай ОДНУ коротку тёплу фразу: просто покажи що ти почув і що "
+                "тобі з ним добре. БЕЗ питань. БЕЗ будь-яких натяків що щось "
+                "«станеться», «буде», «скоро», або що ти щось «починаєш розуміти» - "
+                "жодних підводок і обіцянок. Просто тепле живе завершення думки, "
+                "ніби природна пауза в розмові."
+            )
     if persona_key == "mira":
         name_state = database.get_mira_name_state(user_id)
         mira_already_spoke = any(m["role"] == "assistant" for m in history[:-1])
@@ -1425,7 +1514,12 @@ async def handle_message(message: Message):
         )
     except Exception:
         logging.exception("Ошибка при запросе к Anthropic")
-        await message.answer("Ой, щось пішло не так. Спробуй ще раз трохи згодом.")
+        err_text = (
+            "Ой, щось пішло не так. Спробуй ще раз трохи згодом."
+            if lang == "uk"
+            else "Ой, что-то пошло не так. Попробуй ещё раз чуть позже."
+        )
+        await message.answer(err_text)
         return
 
     # 6) Сохраняем ответ бота и отправляем его пользователю «живыми» репликами.
@@ -1498,9 +1592,12 @@ async def run_checkins():
             history = await asyncio.to_thread(
                 database.get_history, user_id, HISTORY_LIMIT,
             )
+            # Язык диалога — чтобы первое «пишу первой» не дрейфовало на язык
+            # mira.txt. Если истории нет (свежий юзер) — UK по дефолту.
+            lang = _detect_user_language(history) if history else "uk"
             # Текст генерируем в отдельном потоке (запрос к Anthropic блокирующий).
             text = await asyncio.to_thread(
-                generate_checkin, persona_key, facts, history,
+                generate_checkin, persona_key, facts, history, lang,
             )
             await send_bubbles(user_id, text)
             # Сохраняем как сообщение бота, чтобы сохранить непрерывность диалога.
