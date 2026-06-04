@@ -80,8 +80,12 @@ CHECKIN_INTERVALS_HOURS = {
 # Как часто фоновая задача проверяет, кому пора написать (в минутах).
 CHECKIN_POLL_MINUTES = 30
 
+# Корень, куда складываются persistent-данные (БД и медиа). На хостинге это
+# смонтированный volume (например, /data на Fly.io). Локально - корень репо.
+DATA_DIR = os.environ.get("COMPIA_DATA_DIR", ".")
+
 # Имя файла базы данных SQLite.
-DB_PATH = "companion.db"
+DB_PATH = os.path.join(DATA_DIR, "companion.db")
 
 # Папка с текстами персон: по файлу на персону + common.txt с общими правилами.
 PERSONAS_DIR = "personas"
@@ -97,7 +101,7 @@ IMAGE_MODEL_BASE = "fal-ai/flux/dev"
 IMAGE_MODEL_REF = "fal-ai/nano-banana/edit"
 
 # Куда сохраняем сгенерированные изображения (по подпапке на пользователя).
-MEDIA_DIR = "media"
+MEDIA_DIR = os.path.join(DATA_DIR, "media")
 
 # Дефолтная «сцена» для базового портрета: домашний, естественный кадр (не студия).
 BASE_PORTRAIT_SCENE = (

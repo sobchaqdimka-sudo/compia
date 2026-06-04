@@ -1,0 +1,27 @@
+# Версионирование
+.git
+.gitignore
+
+# Локальные секреты и БД (на хостинге другие)
+.env
+.env.example
+*.db
+companion.db
+
+# Локально сгенерированные медиа
+media/
+
+# Виртуальные окружения и кэши
+.venv
+venv
+__pycache__
+*.pyc
+*.log
+
+# Локальные отчёты тестеров (сами модули tester/ В ОБРАЗ НУЖНЫ:
+# product_dashboard.py и cost.py переиспользуются в проде).
+reports/
+tools/
+
+# Telegram-токены/симуляторы локальных тестов
+test_checkin.py

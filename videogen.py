@@ -15,6 +15,7 @@ import subprocess
 import urllib.request
 import uuid
 
+import database
 from config import (
     FAL_KEY,
     MEDIA_DIR,
@@ -27,6 +28,11 @@ from config import (
     VIDEO_MODEL,
     VIDEO_NOTE_SIZE,
 )
+
+# Приблизительные цены fal.ai (USD за вызов), 2026-06.
+FAL_COST_KLING_I2V_5S = 0.40       # Kling 2.1 i2v 5s
+FAL_COST_ELEVENLABS_TTS = 0.20     # ElevenLabs TTS: безопасная верхняя оценка
+FAL_COST_VEED_FABRIC = 0.30        # VEED Fabric липсинк
 
 
 def is_enabled():
@@ -137,6 +143,10 @@ def generate_circle(image_path, motion_prompt, user_id):
         raw, os.path.join(user_dir, f"{uuid.uuid4().hex}_note.mp4")
     )
     logging.info("Сгенерирован видео-кружок user_id=%s", user_id)
+    try:
+        database.add_user_fal_usage(user_id, FAL_COST_KLING_I2V_5S)
+    except Exception:
+        logging.exception("add_user_fal_usage failed user_id=%s", user_id)
     return note
 
 
@@ -192,4 +202,10 @@ def generate_talking_circle(image_path, text, user_id):
         raw, audio_path, os.path.join(user_dir, f"{uuid.uuid4().hex}_tnote.mp4")
     )
     logging.info("Сгенерирован говорящий кружок user_id=%s", user_id)
+    # Учитываем оба вызова: TTS + липсинк.
+    try:
+        database.add_user_fal_usage(user_id, FAL_COST_ELEVENLABS_TTS)
+        database.add_user_fal_usage(user_id, FAL_COST_VEED_FABRIC)
+    except Exception:
+        logging.exception("add_user_fal_usage failed user_id=%s", user_id)
     return note

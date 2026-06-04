@@ -103,6 +103,35 @@
 - `compia-mvp-a` — есть, заморожен на состоянии после Фазы A+C
 - При выпуске D — создать `compia-mvp-b`
 
+## Деплой на Fly.io
+
+Один процесс (бот + aiohttp дашборд) с volume `compia_data`, смонтированным в `/data`.
+БД и медиа лежат на volume; `COMPIA_DATA_DIR=/data` переключает пути в `config.py`.
+
+```bash
+fly auth login
+fly volumes create compia_data --size 1 --region fra
+fly secrets set \
+  TELEGRAM_TOKEN=... \
+  ANTHROPIC_API_KEY=... \
+  FAL_KEY=... \
+  DASHBOARD_USER=... \
+  DASHBOARD_PASSWORD=...
+fly deploy
+```
+
+Дашборд: `https://<app>.fly.dev/dashboard` (basic auth).
+Если `DASHBOARD_USER`/`DASHBOARD_PASSWORD` не заданы — aiohttp не стартует
+(безопасный дефолт, бот продолжает работать).
+
+Аналитика, которая теперь живёт в проде:
+- per-user токены и стоимость Anthropic (через monkey-patch SDK в `tester/cost.py`)
+- per-user счётчики fal.ai (Flux Dev / Nano Banana / Kling / TTS / Fabric)
+- продуктовые события в таблице `events`: `message_received`, `persona_switched`,
+  `adult_confirmed/declined`, `mira_activated`, `nickname_given`,
+  `photo_requested/delivered`, `video_delivered`, `voice_delivered`, `checkin_sent`
+- дашборд переиспользует `tester/product_dashboard.py` (CLI продолжает работать)
+
 ## Не делаем сейчас (отложено)
 См. `product.md` секцию «Отложено на потом».
 

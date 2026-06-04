@@ -1,0 +1,23 @@
+app = "compia"
+primary_region = "fra"
+
+[build]
+
+[env]
+  COMPIA_DATA_DIR = "/data"
+
+[[mounts]]
+  source = "compia_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 512

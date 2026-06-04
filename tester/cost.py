@@ -16,7 +16,7 @@
 import logging
 from collections import defaultdict
 from threading import Lock
-from typing import Any, Dict
+from typing import Any, Callable, Dict, Optional
 
 LOG = logging.getLogger("tester.cost")
 
@@ -83,6 +83,11 @@ _STATS: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
 })
 _INSTALLED = False
 _ORIGINAL_CREATE = None
+# Внешний callback, вызывается после каждой записи. Подпись:
+# (model: str, in_t: int, out_t: int, cache_read: int, cache_write: int, cost_usd: float)
+# Используется продакшен-ботом для записи в БД per-user. Падения коллбека
+# не должны рушить вызов модели - ловим всё.
+_RECORD_CALLBACK: Optional[Callable[..., None]] = None
 
 
 def reset() -> None:
@@ -105,14 +110,30 @@ def _record(model: str, usage) -> None:
         s["cache_read"] += cr
         s["cache_write"] += cw
         s["cost_usd"] += cost
+    # Внешний слушатель (продакшен пишет per-user в БД). Вне lock'а,
+    # чтобы коллбек случайно не задержал следующий вызов модели.
+    cb = _RECORD_CALLBACK
+    if cb is not None:
+        try:
+            cb(model, in_t, out_t, cr, cw, cost)
+        except Exception:
+            LOG.exception("cost tracker record_callback failed")
 
 
-def install_tracker() -> None:
-    """Monkey-patch anthropic SDK чтобы считать токены каждого вызова."""
+def install_tracker(record_callback: Optional[Callable[..., None]] = None) -> None:
+    """Monkey-patch anthropic SDK чтобы считать токены каждого вызова.
+
+    record_callback (опц.) — внешний слушатель, вызывается после каждой
+    записи с (model, in_t, out_t, cache_read, cache_write, cost_usd).
+    Можно поставить позже через set_record_callback() — install_tracker()
+    идемпотентен и не сбрасывает уже работающий патч.
+    """
     global _INSTALLED, _ORIGINAL_CREATE
+    if record_callback is not None:
+        set_record_callback(record_callback)
     if _INSTALLED:
         return
-    import anthropic
+    import anthropic  # noqa: F401  - убедимся что пакет есть
     from anthropic.resources.messages.messages import Messages
 
     _ORIGINAL_CREATE = Messages.create
@@ -130,6 +151,12 @@ def install_tracker() -> None:
     Messages.create = _wrapped
     _INSTALLED = True
     LOG.info("Cost tracker installed (monkey-patched anthropic.Messages.create)")
+
+
+def set_record_callback(cb: Optional[Callable[..., None]]) -> None:
+    """Установить (или снять) внешний слушатель записей."""
+    global _RECORD_CALLBACK
+    _RECORD_CALLBACK = cb
 
 
 def uninstall_tracker() -> None:

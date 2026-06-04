@@ -15,7 +15,14 @@ import os
 import urllib.request
 import uuid
 
+import database
 from config import FAL_KEY, IMAGE_MODEL_BASE, IMAGE_MODEL_REF, MEDIA_DIR, TEST_MODE
+
+# Приблизительные цены fal.ai на момент 2026-06 (USD за вызов). Если поменяются -
+# править здесь. Реальный биллинг идёт в fal-аккаунте, эти числа - для оценки
+# нагрузки на дашборде "сколько мы тратим на юзера".
+FAL_COST_FLUX_DEV = 0.025          # Flux Dev: $0.025/image
+FAL_COST_NANO_BANANA_EDIT = 0.04   # Nano Banana edit: $0.04/image
 
 
 def is_enabled():
@@ -79,6 +86,12 @@ def generate_base_portrait(prompt, user_id):
     dest = os.path.join(_user_dir(user_id), "base.png")
     path = _download(_first_image_url(result), dest)
     logging.info("Сгенерирован базовый портрет user_id=%s", user_id)
+    # Учёт стоимости. После успешного download'а - так мы не считаем
+    # неудачные вызовы fal (а они дороже всего).
+    try:
+        database.add_user_fal_usage(user_id, FAL_COST_FLUX_DEV)
+    except Exception:
+        logging.exception("add_user_fal_usage failed user_id=%s", user_id)
     return path
 
 
@@ -105,4 +118,8 @@ def generate_with_reference(instruction, reference_path, user_id):
     dest = os.path.join(_user_dir(user_id), f"{uuid.uuid4().hex}.png")
     path = _download(_first_image_url(result), dest)
     logging.info("Сгенерировано фото по референсу user_id=%s", user_id)
+    try:
+        database.add_user_fal_usage(user_id, FAL_COST_NANO_BANANA_EDIT)
+    except Exception:
+        logging.exception("add_user_fal_usage failed user_id=%s", user_id)
     return path

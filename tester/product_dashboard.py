@@ -211,6 +211,174 @@ def _fetch_funnel(conn) -> Dict[str, int]:
     }
 
 
+def _has_table(conn, name: str) -> bool:
+    """Есть ли в БД такая таблица. Нужно для совместимости со старыми базами,
+    где events ещё не было."""
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone()
+    return row is not None
+
+
+def _has_column(conn, table: str, column: str) -> bool:
+    """Есть ли колонка. Аналогично - для совместимости со старыми базами."""
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r[1] == column for r in rows)
+
+
+def _fetch_cost_stats(conn) -> Dict[str, float]:
+    """Суммарные траты по юзерам: Anthropic + fal, плюс средние per-user.
+
+    Стоимость храним в "десятитысячных доллара" - конвертируем в USD здесь.
+    Если колонок ещё нет (старая БД) - возвращаем нули.
+    """
+    if not _has_column(conn, "users", "anthropic_cost_cents"):
+        return {
+            "anthropic_total_usd": 0.0,
+            "fal_total_usd": 0.0,
+            "total_usd": 0.0,
+            "avg_anthropic_usd": 0.0,
+            "avg_fal_usd": 0.0,
+            "avg_total_usd": 0.0,
+            "users_paying": 0,
+            "fal_calls_total": 0,
+            "anthropic_input_tokens": 0,
+            "anthropic_output_tokens": 0,
+            "anthropic_cache_read_tokens": 0,
+            "anthropic_cache_write_tokens": 0,
+        }
+    row = conn.execute(
+        """
+        SELECT
+            COALESCE(SUM(anthropic_cost_cents), 0),
+            COALESCE(SUM(fal_cost_cents), 0),
+            COUNT(CASE WHEN anthropic_cost_cents > 0 OR fal_cost_cents > 0 THEN 1 END),
+            COALESCE(SUM(fal_calls), 0),
+            COALESCE(SUM(anthropic_input_tokens), 0),
+            COALESCE(SUM(anthropic_output_tokens), 0),
+            COALESCE(SUM(anthropic_cache_read_tokens), 0),
+            COALESCE(SUM(anthropic_cache_write_tokens), 0)
+        FROM users
+        """
+    ).fetchone()
+    a_units, f_units, paying, fal_calls, in_t, out_t, cr, cw = row
+    anthropic_usd = a_units / 10000.0
+    fal_usd = f_units / 10000.0
+    total_usd = anthropic_usd + fal_usd
+    return {
+        "anthropic_total_usd": anthropic_usd,
+        "fal_total_usd": fal_usd,
+        "total_usd": total_usd,
+        "users_paying": paying,
+        "avg_anthropic_usd": anthropic_usd / max(1, paying),
+        "avg_fal_usd": fal_usd / max(1, paying),
+        "avg_total_usd": total_usd / max(1, paying),
+        "fal_calls_total": fal_calls,
+        "anthropic_input_tokens": in_t,
+        "anthropic_output_tokens": out_t,
+        "anthropic_cache_read_tokens": cr,
+        "anthropic_cache_write_tokens": cw,
+    }
+
+
+def _fetch_top_events(conn, days: int = 7, limit: int = 10) -> List[Tuple[str, int]]:
+    """Топ событий по count за последние N дней."""
+    if not _has_table(conn, "events"):
+        return []
+    cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    rows = conn.execute(
+        """
+        SELECT event_type, COUNT(*) AS c
+        FROM events
+        WHERE created_at >= ?
+        GROUP BY event_type
+        ORDER BY c DESC
+        LIMIT ?
+        """,
+        (cutoff, limit),
+    ).fetchall()
+    return [(t, c) for t, c in rows]
+
+
+def _fetch_event_funnel(conn) -> List[Tuple[str, int]]:
+    """Воронка по фактически случившимся событиям, а не по «текущей персоне».
+
+    Возвращает список (название, кол-во уникальных юзеров). Если таблицы
+    events нет - вернёт хотя бы «всего юзеров» из users.
+    """
+    total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    if not _has_table(conn, "events"):
+        return [("Всього юзерів", total_users)]
+
+    def uniq(event_type: str) -> int:
+        row = conn.execute(
+            "SELECT COUNT(DISTINCT user_id) FROM events WHERE event_type = ?",
+            (event_type,),
+        ).fetchone()
+        return row[0] if row else 0
+
+    return [
+        ("Всього юзерів", total_users),
+        ("Написали ≥1 повідомлення", uniq("message_received")),
+        ("Підтвердили 18+", uniq("adult_confirmed")),
+        ("Активували Міру", uniq("mira_activated")),
+        ("Дали Мірі ім'я", uniq("nickname_given")),
+        ("Запитали фото", uniq("photo_requested")),
+        ("Отримали фото", uniq("photo_delivered")),
+        ("Отримали відео-кружок", uniq("video_delivered")),
+        ("Отримали голосове", uniq("voice_delivered")),
+    ]
+
+
+def _fetch_retention(conn) -> Dict[str, float]:
+    """Простой D1/D7 retention: доля юзеров, активных через 1/7 дней после created_at.
+
+    Считаем по юзерам, чья регистрация (created_at) была >= 1/7 дней назад -
+    иначе у них не было физической возможности «вернуться» на D1/D7.
+    """
+    rows = conn.execute(
+        "SELECT user_id, created_at, last_seen FROM users WHERE created_at IS NOT NULL"
+    ).fetchall()
+    if not rows:
+        return {"d1": 0.0, "d7": 0.0, "d1_eligible": 0, "d7_eligible": 0,
+                "d1_returned": 0, "d7_returned": 0}
+    now = datetime.utcnow()
+    d1_elig = d7_elig = 0
+    d1_ret = d7_ret = 0
+    for _uid, created_at, last_seen in rows:
+        try:
+            ca = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            continue
+        age = now - ca
+        if age >= timedelta(days=1):
+            d1_elig += 1
+            if last_seen:
+                try:
+                    ls = datetime.strptime(last_seen, "%Y-%m-%d %H:%M:%S")
+                    if (ls - ca) >= timedelta(hours=24):
+                        d1_ret += 1
+                except (ValueError, TypeError):
+                    pass
+        if age >= timedelta(days=7):
+            d7_elig += 1
+            if last_seen:
+                try:
+                    ls = datetime.strptime(last_seen, "%Y-%m-%d %H:%M:%S")
+                    if (ls - ca) >= timedelta(days=7):
+                        d7_ret += 1
+                except (ValueError, TypeError):
+                    pass
+    return {
+        "d1": (d1_ret / d1_elig * 100) if d1_elig else 0.0,
+        "d7": (d7_ret / d7_elig * 100) if d7_elig else 0.0,
+        "d1_eligible": d1_elig,
+        "d7_eligible": d7_elig,
+        "d1_returned": d1_ret,
+        "d7_returned": d7_ret,
+    }
+
+
 # ---------------- HTML -----------------
 
 CSS = """
@@ -333,6 +501,89 @@ def _sessions_card(sess: Dict[str, float], cost_per_session: float) -> str:
 """
 
 
+def _cost_card(cost: Dict[str, float]) -> str:
+    """Карточка совокупной стоимости и средних per-user."""
+    return f"""
+<div class="card">
+  <h2>Вартість (Anthropic + fal)</h2>
+  <div class="grid grid-3">
+    {_stat_card("Сумарно", f"${cost['total_usd']:.4f}",
+                f"за {cost['users_paying']} оплачуваних юзерів")}
+    {_stat_card("Anthropic LLM", f"${cost['anthropic_total_usd']:.4f}",
+                f"in {cost['anthropic_input_tokens']:,} / out {cost['anthropic_output_tokens']:,} токенів")}
+    {_stat_card("fal.ai медіа", f"${cost['fal_total_usd']:.4f}",
+                f"{cost['fal_calls_total']} викликів")}
+  </div>
+  <div style="margin-top:14px" class="grid grid-3">
+    {_stat_card("Сер. Anthropic / юзер", f"${cost['avg_anthropic_usd']:.4f}")}
+    {_stat_card("Сер. fal / юзер", f"${cost['avg_fal_usd']:.4f}")}
+    {_stat_card("Сер. сума / юзер", f"${cost['avg_total_usd']:.4f}")}
+  </div>
+  <p class="cost-note" style="background:#f7f7f9; margin-top:14px">
+    Ставки fal.ai захардкоджені у <code>imagegen.py</code> / <code>videogen.py</code>.
+    Anthropic — реальні токени з SDK через <code>tester.cost</code>.
+  </p>
+</div>
+"""
+
+
+def _events_card(events: List[Tuple[str, int]]) -> str:
+    """Карточка топ-N event_type за последние 7 дней."""
+    if not events:
+        return ('<div class="card"><h2>Події за 7 днів</h2>'
+                '<p>Поки немає подій (таблиця <code>events</code> порожня).</p></div>')
+    rows = [
+        f'<tr><td>{_esc(t)}</td><td class="num">{c:,}</td></tr>'
+        for t, c in events
+    ]
+    return f"""
+<div class="card">
+  <h2>Події за останні 7 днів</h2>
+  <table>
+    <thead><tr><th>event_type</th><th>count</th></tr></thead>
+    <tbody>{''.join(rows)}</tbody>
+  </table>
+</div>
+"""
+
+
+def _event_funnel_card(steps: List[Tuple[str, int]]) -> str:
+    """Воронка по реально случившимся событиям (а не по «текущей персоне»)."""
+    if not steps:
+        return ""
+    top = steps[0][1] if steps else 0
+    rows = []
+    for name, val in steps:
+        pct = (val * 100 // top) if top else 0
+        rows.append(
+            f'<div class="funnel-step"><span>{_esc(name)}'
+            f' <span style="color:#888">({pct}%)</span></span>'
+            f'<strong>{val}</strong></div>'
+        )
+    return f'<div class="card"><h2>Воронка за подіями</h2>{"".join(rows)}</div>'
+
+
+def _retention_card(ret: Dict[str, float]) -> str:
+    """Карточка D1/D7 retention."""
+    return f"""
+<div class="card">
+  <h2>Retention (cohort D1 / D7)</h2>
+  <div class="grid grid-3">
+    {_stat_card("D1", f"{ret['d1']:.1f}%",
+                f"{ret['d1_returned']} з {ret['d1_eligible']}")}
+    {_stat_card("D7", f"{ret['d7']:.1f}%",
+                f"{ret['d7_returned']} з {ret['d7_eligible']}")}
+    {_stat_card("База для D7", ret['d7_eligible'],
+                "юзери що зареєстровані ≥ 7 днів тому")}
+  </div>
+  <p class="cost-note" style="background:#f7f7f9; margin-top:14px">
+    D1/D7 = доля юзерів, у яких last_seen ≥ created_at + 1/7 днів.
+    Дуже прості метрики, для прикидки порядку.
+  </p>
+</div>
+"""
+
+
 def render(db_path: str, gap_minutes: int) -> str:
     """Собрать данные из БД и записать HTML. Вернуть путь."""
     conn = _connect(db_path)
@@ -346,6 +597,10 @@ def render(db_path: str, gap_minutes: int) -> str:
         sessions["gap_minutes"] = gap_minutes
         funnel = _fetch_funnel(conn)
         bot_per_persona = _fetch_persona_messages(conn)
+        cost_stats = _fetch_cost_stats(conn)
+        top_events = _fetch_top_events(conn, days=7, limit=10)
+        event_funnel = _fetch_event_funnel(conn)
+        retention = _fetch_retention(conn)
     finally:
         conn.close()
 
@@ -414,6 +669,17 @@ def render(db_path: str, gap_minutes: int) -> str:
 
   <div style="margin-top:24px">
     {_sessions_card(sessions, cost_per_session)}
+  </div>
+
+  <h2 style="margin-top:28px">Реальна вартість і поведінка</h2>
+  <div style="margin-top:12px">
+    {_cost_card(cost_stats)}
+  </div>
+
+  <div style="margin-top:18px" class="grid grid-3">
+    {_event_funnel_card(event_funnel)}
+    {_events_card(top_events)}
+    {_retention_card(retention)}
   </div>
 </div>
 </body>

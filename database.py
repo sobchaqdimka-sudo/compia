@@ -4,6 +4,7 @@
 Поле role = "user" (сообщение человека) или "assistant" (ответ бота).
 """
 
+import json
 import sqlite3
 from datetime import datetime
 
@@ -99,6 +100,48 @@ def init_db():
             conn.execute(f"ALTER TABLE users ADD COLUMN {name} {decl}")
     conn.commit()
 
+    # Миграция: колонки для трекинга стоимости в users. Храним суммарные
+    # токены и стоимость в "сотых цента" (т.е. value 1234 = $0.1234) - так
+    # храним достаточную точность без чисел с плавающей точкой.
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(users)")}
+    usage_columns = {
+        "anthropic_input_tokens": "INTEGER NOT NULL DEFAULT 0",
+        "anthropic_output_tokens": "INTEGER NOT NULL DEFAULT 0",
+        "anthropic_cache_read_tokens": "INTEGER NOT NULL DEFAULT 0",
+        "anthropic_cache_write_tokens": "INTEGER NOT NULL DEFAULT 0",
+        # cost: целые "десятитысячные доллара" — value 10000 = $1.00.
+        "anthropic_cost_cents": "INTEGER NOT NULL DEFAULT 0",
+        "fal_cost_cents": "INTEGER NOT NULL DEFAULT 0",
+        "fal_calls": "INTEGER NOT NULL DEFAULT 0",
+    }
+    for name, decl in usage_columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE users ADD COLUMN {name} {decl}")
+    conn.commit()
+
+    # Таблица продуктовых событий. Простой append-only лог: тип события +
+    # опциональный JSON с деталями. Используется для воронок и аналитики.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS events (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id    INTEGER,
+            event_type TEXT    NOT NULL,
+            event_data TEXT,
+            created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_type_time "
+        "ON events (event_type, created_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_user_time "
+        "ON events (user_id, created_at)"
+    )
+    conn.commit()
+
     # Миграция: всех, кто уже общался с ботом (есть в messages), но кого ещё
     # нет в users, переносим на Миру с подтверждённым 18+. Так старые
     # пользователи не теряют свой романтический контекст и не падают в онбординг.
@@ -122,6 +165,94 @@ def add_message(user_id, role, content):
     conn.execute(
         "INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)",
         (user_id, role, content),
+    )
+    conn.commit()
+    conn.close()
+
+
+# --- Продуктовые события и трекинг стоимости ---
+
+def log_event(user_id, event_type, event_data=None):
+    """Записать продуктовое событие.
+
+    event_data — опциональный словарь, сериализуем в JSON. Если передали
+    что-то несериализуемое (например, объект aiogram) — мягко падаем в str.
+    user_id может быть None для системных событий, не привязанных к юзеру.
+    """
+    payload = None
+    if event_data is not None:
+        try:
+            payload = json.dumps(event_data, ensure_ascii=False)
+        except (TypeError, ValueError):
+            payload = json.dumps({"_repr": str(event_data)}, ensure_ascii=False)
+    conn = _connect()
+    conn.execute(
+        "INSERT INTO events (user_id, event_type, event_data) VALUES (?, ?, ?)",
+        (user_id, event_type, payload),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _usd_to_units(cost_usd):
+    """USD как float -> целые "десятитысячные доллара" (value 10000 = $1.00).
+
+    Округляем половиной к ближайшему, чтобы суммирование тысяч мелких
+    вызовов не сваливалось в смещение.
+    """
+    if not cost_usd:
+        return 0
+    return int(round(float(cost_usd) * 10000))
+
+
+def add_user_anthropic_usage(user_id, in_t, out_t, cache_r, cache_w, cost_usd):
+    """Прибавить к счётчикам юзера токены и стоимость одного Anthropic-вызова.
+
+    Стоимость храним в "десятитысячных доллара" (см. _usd_to_units), чтобы
+    не плодить ошибки float-сумм. Если user_id == None — молча игнорим
+    (это вызов без контекста юзера, напр. из фоновой задачи перед polling).
+    """
+    if user_id is None:
+        return
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    conn.execute(
+        """
+        UPDATE users SET
+            anthropic_input_tokens       = anthropic_input_tokens + ?,
+            anthropic_output_tokens      = anthropic_output_tokens + ?,
+            anthropic_cache_read_tokens  = anthropic_cache_read_tokens + ?,
+            anthropic_cache_write_tokens = anthropic_cache_write_tokens + ?,
+            anthropic_cost_cents         = anthropic_cost_cents + ?
+        WHERE user_id = ?
+        """,
+        (
+            int(in_t or 0),
+            int(out_t or 0),
+            int(cache_r or 0),
+            int(cache_w or 0),
+            _usd_to_units(cost_usd),
+            user_id,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def add_user_fal_usage(user_id, cost_usd):
+    """Прибавить один fal-вызов и его стоимость к счётчикам юзера."""
+    if user_id is None:
+        return
+    conn = _connect()
+    _ensure_user(conn, user_id)
+    conn.execute(
+        """
+        UPDATE users SET
+            fal_cost_cents = fal_cost_cents + ?,
+            fal_calls      = fal_calls + 1
+        WHERE user_id = ?
+        """,
+        (_usd_to_units(cost_usd), user_id),
     )
     conn.commit()
     conn.close()

@@ -12,6 +12,8 @@ import os
 import random
 import re
 import shutil
+from contextvars import ContextVar
+from typing import Optional
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
@@ -76,6 +78,34 @@ logging.basicConfig(level=logging.INFO)
 # bot — подключение к Telegram; dp — диспетчер, который раздаёт сообщения хэндлерам.
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
+
+# Текущий user_id для каждого активного хендлера. Используется коллбеком
+# трекера Anthropic-стоимости, чтобы привязать каждый вызов модели к юзеру,
+# в чьём ходу он случился. ContextVar — потому что asyncio-таски и to_thread
+# наследуют контекст автоматически, без явной передачи.
+current_user_id: ContextVar[Optional[int]] = ContextVar(
+    "current_user_id", default=None
+)
+
+
+def _on_anthropic_call(model, in_t, out_t, cache_r, cache_w, cost_usd):
+    """Коллбек cost-трекера: пишет per-user статистику Anthropic в БД.
+
+    Вызывается из monkey-patched anthropic.Messages.create в потоке, куда
+    asyncio.to_thread вынес блокирующий вызов. ContextVar наследуется
+    автоматически, поэтому current_user_id здесь актуальный.
+    """
+    try:
+        uid = current_user_id.get()
+        if uid is None:
+            # Фоновые вызовы (напр. checkin перед polling) - не теряем
+            # деньги, но и не привязываем к юзеру: считаем как «прочее».
+            return
+        database.add_user_anthropic_usage(
+            uid, in_t, out_t, cache_r, cache_w, cost_usd
+        )
+    except Exception:
+        logging.exception("Anthropic usage callback failed")
 
 
 # --- Клавиатуры (кнопки под сообщением) ---
@@ -648,6 +678,7 @@ async def handle_start(message: Message):
     всю историю случайно.
     """
     user_id = message.from_user.id
+    current_user_id.set(user_id)
     # «Осмысленное состояние» - не только написанные сообщения, но и любые
     # выборы, которые юзер уже сделал (персона, гейт, описание внешности).
     # Иначе повторный /start после клика по кнопке выбора персоны без единой
@@ -674,6 +705,7 @@ async def handle_start(message: Message):
 async def handle_persona(message: Message):
     """Показать кнопки выбора персоны. Текущая персона не показывается."""
     user_id = message.from_user.id
+    current_user_id.set(user_id)
     current = database.get_persona(user_id)
     history = database.get_history(user_id, HISTORY_LIMIT)
     lang = _detect_user_language(history)
@@ -689,6 +721,7 @@ async def handle_persona(message: Message):
 async def handle_checkins(message: Message):
     """Настройка частоты проактивных сообщений («бот пишет первым»)."""
     user_id = message.from_user.id
+    current_user_id.set(user_id)
     current = database.get_checkin_freq(user_id)
     history = database.get_history(user_id, HISTORY_LIMIT)
     lang = _detect_user_language(history)
@@ -712,6 +745,7 @@ async def handle_checkins(message: Message):
 async def handle_newlook(message: Message):
     """Пересоздать внешность Миры: сбросить и попросить описать заново."""
     user_id = message.from_user.id
+    current_user_id.set(user_id)
     history = database.get_history(user_id, HISTORY_LIMIT)
     lang = _detect_user_language(history)
     if database.get_persona(user_id) != "mira":
@@ -744,6 +778,7 @@ async def on_start_choice(callback: CallbackQuery):
     # в таком случае оставляем продуктовый дефолт UK. Если переписка уже была
     # (повторный /start без сброса) - подстраиваемся.
     user_id = callback.from_user.id
+    current_user_id.set(user_id)
     history = database.get_history(user_id, HISTORY_LIMIT)
     lang = _detect_user_language(history) if history else "uk"
     if choice == "choose":
@@ -769,6 +804,7 @@ async def on_persona_chosen(callback: CallbackQuery):
     key = callback.data.split(":", 1)[1]
     info = personas.PERSONAS.get(key)
     user_id = callback.from_user.id
+    current_user_id.set(user_id)
 
     if info is None:
         await callback.answer()
@@ -790,12 +826,16 @@ async def on_persona_chosen(callback: CallbackQuery):
         return
 
     database.set_persona(user_id, key)
+    database.log_event(user_id, "persona_switched", {"to": key, "source": "manual"})
     # Ручная смена персоны отменяет любое старое «ждём описание внешности» -
     # иначе следующее сообщение (в т.ч. «Привіт») уйдёт в генератор портрета.
     database.clear_stale_awaiting_description(user_id)
     if key == "mira":
+        first_mira = database.get_mira_activated_at(user_id) is None
         database.set_mira_activated_if_unset(user_id)
         _ensure_mira_real_name(user_id)
+        if first_mira:
+            database.log_event(user_id, "mira_activated", {"source": "manual"})
     # Подтверждающее сообщение - на языке диалога. Истории к этому моменту
     # может ещё не быть (пришёл от /persona в нулевом онбординге) - тогда UK.
     history = database.get_history(user_id, HISTORY_LIMIT)
@@ -815,18 +855,23 @@ async def on_adult_choice(callback: CallbackQuery):
     """Ответ на подтверждение возраста (только для Миры)."""
     choice = callback.data.split(":", 1)[1]
     user_id = callback.from_user.id
+    current_user_id.set(user_id)
     history = database.get_history(user_id, HISTORY_LIMIT)
     lang = _detect_user_language(history)
 
     if choice == "yes":
         database.set_adult_confirmed(user_id)
         database.clear_adult_declined(user_id)
+        database.log_event(user_id, "adult_confirmed")
         database.set_persona(user_id, "mira")
         # Любое предыдущее «ждём описание внешности» (если оно зависло после
         # /newlook у другой персоны) - не актуально на момент свежего входа.
         database.clear_stale_awaiting_description(user_id)
+        first_mira = database.get_mira_activated_at(user_id) is None
         database.set_mira_activated_if_unset(user_id)
         _ensure_mira_real_name(user_id)
+        if first_mira:
+            database.log_event(user_id, "mira_activated", {"source": "gate"})
         # Без «Дякую. Тепер поруч Міра» — даём ей самой написать первой
         # (так появление не выглядит как системное уведомление).
         await send_persona_transition(callback.message, user_id, "mira")
@@ -834,6 +879,7 @@ async def on_adult_choice(callback: CallbackQuery):
         # Фиксируем отказ - больше не дёргаем гейт автоматически (только если
         # пользователь сам выберет Миру через /persona).
         database.set_adult_declined(user_id)
+        database.log_event(user_id, "adult_declined")
         await callback.message.answer(GATE_MESSAGES[lang]["no_reply"])
     await callback.answer()
 
@@ -843,6 +889,7 @@ async def on_reset_choice(callback: CallbackQuery):
     """Подтверждение полного сброса по повторному /start."""
     choice = callback.data.split(":", 1)[1]
     user_id = callback.from_user.id
+    current_user_id.set(user_id)
 
     if choice == "yes":
         # Язык фиксируем ДО wipe — иначе после стирания истории детектор
@@ -871,6 +918,7 @@ async def on_checkin_choice(callback: CallbackQuery):
         await callback.answer()
         return
     user_id = callback.from_user.id
+    current_user_id.set(user_id)
     database.set_checkin_freq(user_id, freq)
     history = database.get_history(user_id, HISTORY_LIMIT)
     lang = _detect_user_language(history) if history else "uk"
@@ -1267,6 +1315,7 @@ async def _generate_and_send_talking(message, user_id, look, history, facts, lan
     # В историю кладём то, что она «сказала» голосом - для непрерывности диалога.
     database.add_message(user_id, "assistant", line)
     await message.answer_video_note(FSInputFile(path))
+    database.log_event(user_id, "voice_delivered")
 
 
 async def _generate_and_send_circle(message, user_id, look, request_text, lang):
@@ -1291,6 +1340,7 @@ async def _generate_and_send_circle(message, user_id, look, request_text, lang):
     database.add_message(user_id, "assistant", follow)
     await message.answer_video_note(FSInputFile(path))
     await message.answer(follow)
+    database.log_event(user_id, "video_delivered")
 
 
 async def _generate_and_send_base(message, user_id, description, lang):
@@ -1315,6 +1365,7 @@ async def _generate_and_send_base(message, user_id, description, lang):
     caption = msgs["base_caption"]
     database.add_message(user_id, "assistant", caption)
     sent = await message.answer_photo(FSInputFile(path), caption=caption)
+    database.log_event(user_id, "photo_delivered", {"kind": "base"})
     # Закреплять СРАЗУ нельзя - юзер ещё не подтвердил, что нравится.
     # Запомним msg_id, закрепим позже когда придёт позитивная реакция
     # (см. ветку 6.4 в handle_message). В тестовом режиме answer_photo
@@ -1348,6 +1399,7 @@ async def _generate_and_send_photo(message, user_id, look, request_text, lang):
     caption = random.choice(msgs["captions"])
     database.add_message(user_id, "assistant", caption)
     await message.answer_photo(FSInputFile(path), caption=caption)
+    database.log_event(user_id, "photo_delivered", {"kind": "edit"})
 
 
 async def try_handle_mira_media(message, user_id, history, facts):
@@ -1417,6 +1469,10 @@ async def try_handle_mira_media(message, user_id, history, facts):
         await message.answer(ask)
         return True
 
+    database.log_event(
+        user_id, "photo_requested" if intent == "photo" else f"{intent}_requested",
+        {"keyword_match": intent_keyword == intent},
+    )
     if intent == "photo":
         await _generate_and_send_photo(message, user_id, look, text, lang)
     elif intent == "talking":
@@ -1451,6 +1507,19 @@ async def handle_message(message: Message):
     ):
         return
     user_id = message.from_user.id
+    current_user_id.set(user_id)
+    # Лёгкая аналитика: каждое входящее сообщение - событие. Тип контента
+    # пригодится для воронки «дошёл ли до фото-обмена».
+    try:
+        if message.photo:
+            content_kind = "photo"
+        elif message.text:
+            content_kind = "text"
+        else:
+            content_kind = "other"
+        database.log_event(user_id, "message_received", {"kind": content_kind})
+    except Exception:
+        logging.exception("log_event message_received failed user_id=%s", user_id)
 
     # Принимаем текст и фото (с подписью или без); прочее (стикеры, голосовые)
     # пока пропускаем. Текст «не понимаю» - на языке диалога, по существующей
@@ -1531,10 +1600,14 @@ async def handle_message(message: Message):
         if need == "romantic":
             if database.is_adult_confirmed(user_id):
                 database.set_persona(user_id, "mira")
+                first_mira = database.get_mira_activated_at(user_id) is None
                 database.set_mira_activated_if_unset(user_id)
                 _ensure_mira_real_name(user_id)
                 persona_key = "mira"
                 just_switched = True
+                database.log_event(user_id, "persona_switched", {"to": "mira", "source": "onboarding"})
+                if first_mira:
+                    database.log_event(user_id, "mira_activated", {"source": "onboarding"})
                 logging.info("Онбординг: user_id=%s -> mira", user_id)
             elif database.is_adult_declined(user_id):
                 # Уже отказался от гейта раньше - не дёргаем заново. Просто
@@ -1543,6 +1616,7 @@ async def handle_message(message: Message):
                     database.set_persona(user_id, "friend")
                     persona_key = "friend"
                     just_switched = True
+                    database.log_event(user_id, "persona_switched", {"to": "friend", "source": "onboarding_declined"})
                 logging.info("Онбординг: user_id=%s romantic, но уже отказался от гейта", user_id)
             else:
                 # Гейт пошлём СРАЗУ после финальной реплики хоста (см. ниже),
@@ -1555,6 +1629,7 @@ async def handle_message(message: Message):
             database.set_persona(user_id, need)
             persona_key = need
             just_switched = True
+            database.log_event(user_id, "persona_switched", {"to": need, "source": "onboarding"})
             logging.info("Онбординг: user_id=%s -> %s", user_id, need)
 
     # 4.2) Также для friend/coach: если в разговоре явная тяга к близости -
@@ -1577,10 +1652,14 @@ async def handle_message(message: Message):
             if database.is_adult_confirmed(user_id):
                 # Возраст подтверждён - сразу переключаем на Миру.
                 database.set_persona(user_id, "mira")
+                first_mira = database.get_mira_activated_at(user_id) is None
                 database.set_mira_activated_if_unset(user_id)
                 _ensure_mira_real_name(user_id)
                 persona_key = "mira"
                 just_switched = True
+                database.log_event(user_id, "persona_switched", {"to": "mira", "source": "friend_coach"})
+                if first_mira:
+                    database.log_event(user_id, "mira_activated", {"source": "friend_coach"})
                 logging.info("Friend/Coach -> mira: user_id=%s adult", user_id)
             else:
                 # Гейт пошлём после финальной реплики текущей персоны.
@@ -1636,6 +1715,7 @@ async def handle_message(message: Message):
                 if action == "propose" and name:
                     database.set_mira_nickname(user_id, name)
                     name_state = {"status": "nicknamed", "nickname": name}
+                    database.log_event(user_id, "nickname_given", {"name": name})
                     logging.info("Mira nickname set user_id=%s -> %s", user_id, name)
                 elif action == "refuse":
                     database.set_mira_name_revealed(user_id)
@@ -1752,6 +1832,7 @@ async def run_checkins():
     """Один проход: найти, кому пора написать первым, и отправить сообщение."""
     due = await asyncio.to_thread(database.get_due_checkin_users)
     for user_id, persona_key, facts in due:
+        current_user_id.set(user_id)
         try:
             # Подтягиваем последний кусок переписки, чтобы check-in продолжал
             # тему, а не начинал заново.
@@ -1769,6 +1850,7 @@ async def run_checkins():
             # Сохраняем как сообщение бота, чтобы сохранить непрерывность диалога.
             database.add_message(user_id, "assistant", text)
             database.set_last_checkin(user_id)
+            database.log_event(user_id, "checkin_sent", {"persona": persona_key})
             logging.info("Проактивное сообщение отправлено user_id=%s", user_id)
         except Exception:
             logging.exception(
@@ -1784,6 +1866,95 @@ async def checkin_loop():
             await run_checkins()
         except Exception:
             logging.exception("Ошибка в фоновой задаче проактивных сообщений")
+
+
+# --- Встроенный дашборд (aiohttp) ---
+
+async def _dashboard_handler(request):
+    """Отдать готовый HTML продакт-дашборда. Защищено basic auth.
+
+    Параметр ?gap=N задаёт порог разделения сессий в минутах (дефолт 30).
+    Под капотом дёргаем tester.product_dashboard.render — он пишет HTML
+    во временную папку и возвращает путь; мы его читаем и отдаём как ответ.
+    """
+    from aiohttp import web
+    import base64 as _b64
+
+    user_env = os.environ.get("DASHBOARD_USER")
+    pwd_env = os.environ.get("DASHBOARD_PASSWORD")
+    auth_header = request.headers.get("Authorization", "")
+    expected = "Basic " + _b64.b64encode(
+        f"{user_env}:{pwd_env}".encode("utf-8")
+    ).decode("ascii")
+    if auth_header != expected:
+        return web.Response(
+            status=401,
+            headers={"WWW-Authenticate": 'Basic realm="compia-dashboard"'},
+            text="Auth required",
+        )
+
+    try:
+        gap_minutes = int(request.query.get("gap", "30"))
+    except ValueError:
+        gap_minutes = 30
+
+    from config import DB_PATH
+
+    if not os.path.exists(DB_PATH):
+        return web.Response(
+            status=503,
+            text="Database not initialized yet. Wait a moment and refresh.",
+        )
+
+    try:
+        from tester import product_dashboard
+        html_path = await asyncio.to_thread(
+            product_dashboard.render, DB_PATH, gap_minutes
+        )
+        with open(html_path, "r", encoding="utf-8") as f:
+            html = f.read()
+        return web.Response(body=html, content_type="text/html", charset="utf-8")
+    except Exception as exc:
+        logging.exception("Dashboard render failed")
+        return web.Response(status=500, text=f"Dashboard error: {exc}")
+
+
+async def _health_handler(request):
+    """Простой пинг для Fly.io healthcheck. Без auth."""
+    from aiohttp import web
+    return web.Response(text="ok")
+
+
+async def start_dashboard_server():
+    """Поднять aiohttp на DASHBOARD_PORT (дефолт 8080).
+
+    Сервер стартует ТОЛЬКО если заданы DASHBOARD_USER и DASHBOARD_PASSWORD -
+    иначе любой может прочитать продакт-метрики по публичному URL Fly.io.
+    Безопасный дефолт: тихо не запускаемся и просим админа настроить.
+    """
+    user_env = os.environ.get("DASHBOARD_USER")
+    pwd_env = os.environ.get("DASHBOARD_PASSWORD")
+    if not user_env or not pwd_env:
+        logging.warning(
+            "Dashboard server NOT started: set DASHBOARD_USER and DASHBOARD_PASSWORD "
+            "to expose /dashboard. Bot continues working without it."
+        )
+        return
+
+    from aiohttp import web
+
+    app = web.Application()
+    app.router.add_get("/dashboard", _dashboard_handler)
+    app.router.add_get("/health", _health_handler)
+    # Корень: чтобы Fly health-check на "/" не отдавал 404 в логах.
+    app.router.add_get("/", _health_handler)
+
+    port = int(os.environ.get("DASHBOARD_PORT", "8080"))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host="0.0.0.0", port=port)
+    await site.start()
+    logging.info("Dashboard listening on 0.0.0.0:%s/dashboard (basic auth on)", port)
 
 
 async def _register_slash_commands():
@@ -1815,6 +1986,15 @@ async def main():
     database.init_db()
     await _register_slash_commands()
 
+    # Cost-трекер Anthropic SDK: monkey-patches Messages.create и пишет
+    # per-user токены/доллары в БД через коллбек, который читает
+    # current_user_id (ContextVar выставляется в каждом хендлере).
+    try:
+        from tester.cost import install_tracker
+        install_tracker(record_callback=_on_anthropic_call)
+    except Exception:
+        logging.exception("Не удалось установить cost-трекер Anthropic")
+
     # Диагностика фото: какой Python запустил бота и виден ли ему fal_client.
     # Если тут WARNING — пакет стоит в ДРУГОМ интерпретаторе (типичная беда на Mac).
     import sys
@@ -1834,6 +2014,8 @@ async def main():
 
     # Фоновая задача «бот пишет первым» крутится параллельно с приёмом сообщений.
     asyncio.create_task(checkin_loop())
+    # Веб-дашборд (опционально, если заданы DASHBOARD_USER/PASSWORD).
+    asyncio.create_task(start_dashboard_server())
     await dp.start_polling(bot)
 
 
