@@ -34,6 +34,7 @@ from ai import (
     build_image_prompt,
     build_video_motion,
     detect_media_request,
+    detect_name_question,
     detect_need,
     detect_nickname_action,
     generate_checkin,
@@ -318,12 +319,17 @@ def _build_mira_look_block(desc):
     )
 
 
-def _build_mira_name_block(name_state, real_name):
+def _build_mira_name_block(name_state, real_name, must_invite=False):
     """Дополнительная системная инструкция для Миры на этот ход — про имя.
 
     real_name — «настоящее» имя именно для этого юзера (у каждого своё, чтоб
     у разных юзеров не была одна и та же «Мира»). Внутреннее кодовое имя
     модели остаётся «Мира» (только в коде/конфиге).
+
+    must_invite — True если детектор поймал прямой вопрос юзера про имя
+    («А ти?», «як тебе звати?», «у тебя есть имя?») и Мира ОБЯЗАНА в этом
+    ходу сделать IKEA-приглашение (а не игнорировать вопрос). Имеет смысл
+    только когда status == 'unrevealed'.
     """
     status = name_state["status"]
     nickname = name_state["nickname"]
@@ -342,6 +348,50 @@ def _build_mira_name_block(name_state, real_name):
             f"{real_name}, когда уместно."
         )
     # unrevealed
+    invite_now_block = ""
+    if must_invite:
+        invite_now_block = (
+            f"\n\n=== СРОЧНОЕ ПРАВИЛО ЭТОГО ХОДА (главнее всего остального) ===\n"
+            f"В ПОСЛЕДНЕМ сообщении человек прямо спросил, как тебя зовут - явно "
+            f"или короткой встречной формой («як тебе звати?», «как тебя зовут?», "
+            f"«А ти?» / «А тебе?» / «А ти як?» после того, как он сам только что "
+            f"назвался по имени, «у тебя есть имя?», «як до тебе звертатись?», и "
+            f"т.п.). Это ПЕРВЫЙ его прямой вопрос про твоё имя.\n\n"
+            f"АБСОЛЮТНЫЕ ЗАПРЕТЫ на этот ход:\n"
+            f"- НЕЛЬЗЯ проигнорировать вопрос про имя - даже если в его сообщении "
+            f"было много других интересных деталей (что он сказал про себя, что "
+            f"почувствовал, какой эмодзи поставил).\n"
+            f"- НЕЛЬЗЯ ответить только на «эмоциональную» часть его сообщения "
+            f"(«красивое имя», «дякую що розповів», «ти сказав важливу штуку», "
+            f"«це не слабкість») и сменить тему вопросом про что-то ещё. Это "
+            f"САМАЯ ЧАСТАЯ ошибка - тёплая реакция БЕЗ ответа на вопрос про "
+            f"имя = ты ПРОВАЛИЛА ход.\n"
+            f"- НЕЛЬЗЯ задать встречный вопрос про другую тему («а откуда ты?», "
+            f"«а что любишь?», «а ті \"класні речі...\"?») вместо ответа про "
+            f"имя. Это уход от вопроса.\n"
+            f"- НЕЛЬЗЯ сказать своё имя «{real_name}» - это ПЕРВЫЙ вопрос, "
+            f"сейчас работает IKEA-приглашение, а не раскрытие.\n"
+            f"- НЕЛЬЗЯ задать встречный «а тебя?» / «а як тебе?» - он уже "
+            f"представился, ход за тобой.\n\n"
+            f"ОБЯЗАТЕЛЬНАЯ СТРУКТУРА твоего ответа:\n"
+            f"1) Если он только что представился по имени - КОРОТКО (1 фраза) "
+            f"тепло прими его имя («Максим - гарне ім'я» / «Максим... мені "
+            f"подобається»). Не больше одной короткой фразы.\n"
+            f"2) СРАЗУ после - IKEA-приглашение: тепло сказать, что имя у тебя "
+            f"есть, но тебе очень хочется, чтобы он сам тебе его придумал. Это "
+            f"САМАЯ ВАЖНАЯ часть ответа, без неё ход не засчитан.\n"
+            f"3) Никаких «копаний глубже» в другие темы из его сообщения в "
+            f"ЭТОМ ходу. Оставь пространство для его ответа на приглашение.\n\n"
+            "Примеры правильного ответа на «Мене Максим звати, я з Києва. А ти?»:\n"
+            "- «Максим... тепле ім'я 🙂\nЗнаєш, у мене теж є, але мені страшенно "
+            "хочеться, щоб ти сам мені його придумав. Спробуєш?»\n"
+            "- «Максим - класно звучить.\nА в мене... є, але я хочу почути, "
+            "як ти мене назвеш. Дай мені ім'я?»\n"
+            "Пример НЕПРАВИЛЬНОГО (так делать НЕЛЬЗЯ): «Максим - гарне ім'я 😊 "
+            "Дякую що розповів. Ти сказав важливу штуку: ... Слухай, а мені "
+            "цікаво - ті \"класні речі\"... це що?» - здесь вопрос про имя "
+            "ПРОИГНОРИРОВАН, тема сменена. Это провал хода.\n"
+        )
     return (
         f"ВАЖНО про имя: твоё настоящее имя - {real_name}, но СЕЙЧАС ты его НЕ "
         f"называешь и ВООБЩЕ не поднимаешь тему имени. Темы имени для тебя сейчас "
@@ -1519,28 +1569,43 @@ async def handle_message(message: Message):
     if persona_key == "mira":
         name_state = database.get_mira_name_state(user_id)
         mira_already_spoke = any(m["role"] == "assistant" for m in history[:-1])
-        if (
-            image_payload is None
-            and name_state["status"] == "unrevealed"
-            and mira_already_spoke
-        ):
-            try:
-                action, name = await asyncio.to_thread(
-                    detect_nickname_action, user_text
-                )
-            except Exception:
-                logging.exception("nickname detection failed user_id=%s", user_id)
-                action, name = "neither", ""
-            if action == "propose" and name:
-                database.set_mira_nickname(user_id, name)
-                name_state = {"status": "nicknamed", "nickname": name}
-                logging.info("Mira nickname set user_id=%s -> %s", user_id, name)
-            elif action == "refuse":
-                database.set_mira_name_revealed(user_id)
-                name_state = {"status": "revealed", "nickname": None}
-                logging.info("Mira name revealed (refused nickname) user_id=%s", user_id)
+        must_invite_name = False
+        if image_payload is None and name_state["status"] == "unrevealed":
+            if mira_already_spoke:
+                try:
+                    action, name = await asyncio.to_thread(
+                        detect_nickname_action, user_text
+                    )
+                except Exception:
+                    logging.exception("nickname detection failed user_id=%s", user_id)
+                    action, name = "neither", ""
+                if action == "propose" and name:
+                    database.set_mira_nickname(user_id, name)
+                    name_state = {"status": "nicknamed", "nickname": name}
+                    logging.info("Mira nickname set user_id=%s -> %s", user_id, name)
+                elif action == "refuse":
+                    database.set_mira_name_revealed(user_id)
+                    name_state = {"status": "revealed", "nickname": None}
+                    logging.info("Mira name revealed (refused nickname) user_id=%s", user_id)
+            # Параллельно: ловим прямой вопрос про имя ("А ти?", "як тебе
+            # звати?", "у тебя есть имя?"). Он может прилететь и на ПЕРВОЙ
+            # реплике Миры, до того как detect_nickname_action вообще
+            # запустится. Поднимаем флаг — name_block добавит жёсткое
+            # требование сделать IKEA-приглашение в этом ходу.
+            if name_state["status"] == "unrevealed":
+                try:
+                    must_invite_name = await asyncio.to_thread(
+                        detect_name_question, user_text
+                    )
+                except Exception:
+                    logging.exception("name question detection failed user_id=%s", user_id)
+                    must_invite_name = False
+                if must_invite_name:
+                    logging.info("Mira got direct name question user_id=%s", user_id)
         real_name = _ensure_mira_real_name(user_id)
-        extra_parts.append(_build_mira_name_block(name_state, real_name))
+        extra_parts.append(
+            _build_mira_name_block(name_state, real_name, must_invite_name)
+        )
         # Стадия отношений: тон Миры меняется с временем и количеством сообщений.
         stage, days = _compute_mira_stage(user_id)
         extra_parts.append(_build_mira_stage_block(stage, days))
